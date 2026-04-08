@@ -2,3 +2,4 @@ fastapi
 uvicorn
 stripe>=12.0.0
 supabase
+python-dotenv

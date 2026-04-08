@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.routes import receipt_routes
 from routes.checkout.routes import checkout_routes
