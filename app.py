@@ -13,3 +13,7 @@ app.include_router(receipt_routes, prefix="/api/receiptvault")
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")
+
+@app.get("/")
+def root():
+    return {"status": "main backend running"}
