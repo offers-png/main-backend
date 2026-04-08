@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import stripe
 import os
+import traceback
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
@@ -27,40 +28,42 @@ class CreateLinkBody(BaseModel):
 @checkout_routes.get("/")
 def checkout_root():
     return {"service": "checkout running"}
+
 @checkout_routes.post("/create-link")
 def create_link(body: CreateLinkBody):
-    plan = body.plan
+    try:
+        plan = body.plan
 
-    if plan not in PRICE_MAP:
-        return {"error": "Invalid plan"}
+        if plan not in PRICE_MAP:
+            raise HTTPException(status_code=400, detail="Invalid plan")
 
-    price = PRICE_MAP[plan]
+        if not stripe.api_key:
+            raise HTTPException(status_code=500, detail="Missing STRIPE_SECRET_KEY")
 
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        mode="payment",
-        line_items=[
-            {
-                "price_data": {
-                    "currency": "usd",
-                    "product_data": {
-                        "name": f"API Access ({plan})"
+        price = PRICE_MAP[plan]
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="payment",
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {
+                            "name": f"API Access ({plan})"
+                        },
+                        "unit_amount": price,
                     },
-                    "unit_amount": price,
-                },
-                "quantity": 1,
-            }
-        ],
-        success_url="https://yourdomain.com/success",
-        cancel_url="https://yourdomain.com/cancel",
-        metadata={"plan": plan},
-    )
+                    "quantity": 1,
+                }
+            ],
+            success_url="https://main-backend-k32m.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://main-backend-k32m.onrender.com/cancel",
+            metadata={"plan": plan},
+        )
 
-    return {
-        "checkout_url": session.url
-    }
-    return {
-        "message": "create-link route wired",
-        "plan": plan,
-        "price": price
-    }
+        return {"checkout_url": session.url}
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
