@@ -25,6 +25,32 @@ PRICE_MAP = {
 class CreateLinkBody(BaseModel):
     plan: str = "7d"
 
+@checkout_routes.get("/verify-session")
+def verify_session(session_id: str):
+    try:
+        if not stripe.api_key:
+            raise HTTPException(status_code=500, detail="Missing STRIPE_SECRET_KEY")
+
+        session = stripe.checkout.Session.retrieve(session_id)
+
+        if session.payment_status != "paid":
+            raise HTTPException(status_code=400, detail="Payment not completed")
+
+        import uuid
+        api_key = f"ka_{uuid.uuid4().hex}"
+
+        return {
+            "status": "success",
+            "api_key": api_key,
+            "plan": session.metadata.get("plan")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @checkout_routes.get("/")
 def checkout_root():
     return {"service": "checkout running"}
@@ -57,8 +83,8 @@ def create_link(body: CreateLinkBody):
                     "quantity": 1,
                 }
             ],
-            success_url="https://main-backend-k32m.onrender.com/success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url="https://main-backend-k32m.onrender.com/cancel",
+            success_url="https://one-time-checkout.onrender.com/success.html?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://one-time-checkout.onrender.com/cancel.html",
             metadata={"plan": plan},
         )
 
