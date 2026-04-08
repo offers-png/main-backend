@@ -85,6 +85,7 @@ async def stripe_webhook(request: Request):
         if WEBHOOK_SECRET:
             try:
                 event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
+                event = event.to_dict_recursive() if hasattr(event, 'to_dict_recursive') else dict(event)
             except stripe.error.SignatureVerificationError:
                 # Secret mismatch — parse without verification (safe since we control the endpoint)
                 import json
