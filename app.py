@@ -1,8 +1,12 @@
-from routes.clipper import clipper_routes
-from routes.receiptvault import receipt_routes
-from routes.checkout import checkout_routes
-from routes.competitor import competitor_routes
-from routes.mobile import mobile_routes
+from fastapi import FastAPI
+
+from routes.clipper.routes import clipper_routes
+from routes.receiptvault.routes import receipt_routes
+from routes.checkout.routes import checkout_routes
+from routes.competitor.routes import competitor_routes
+from routes.mobile.routes import mobile_routes
+
+app = FastAPI()
 
 app.include_router(clipper_routes, prefix="/api/clipper")
 app.include_router(receipt_routes, prefix="/api/receiptvault")
