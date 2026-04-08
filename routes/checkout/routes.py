@@ -1,42 +1,41 @@
-/* =========================
-   CREATE PAYMENT LINK
-   ========================= */
-app.post("/api/create-link", async (req, res) => {
-  const { plan = "7d" } = req.body;
-  const price = PRICE_MAP[plan];
+from fastapi import APIRouter, Request
 
+checkout_routes = APIRouter()
 
-  if (!(plan in PLAN_MAP)) {
-    return res.status(400).json({ error: "Invalid plan" });
-  }
+PLAN_MAP = {
+    "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000,
+    "30d": 30 * 24 * 60 * 60 * 1000,
+    "lifetime": None,
+}
 
-  const host = req.get("x-forwarded-host") || req.get("host");
-  const proto = req.get("x-forwarded-proto") || req.protocol;
-  const baseUrl = `${proto}://${host}`;
+PRICE_MAP = {
+    "24h": 200,
+    "7d": 1000,
+    "30d": 3000,
+    "lifetime": 10000,
+}
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "payment",
-    metadata: { plan },
-    line_items: [
-      {
-        price_data: {
-          currency: "usd",
-          product_data: { name: `API Access (${plan})` },
-          unit_amount: price,
-        },
-        quantity: 1,
-      },
-    ],
-    success_url: `${baseUrl}/success.html?session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${baseUrl}/cancel.html`,
-  });
+@checkout_routes.get("/")
+def checkout_root():
+    return {"service": "checkout running"}
 
-  db.prepare(`
-    INSERT INTO links (session_id, checkout_url)
-    VALUES (?, ?)
-  `).run(session.id, session.url);
+@checkout_routes.post("/create-link")
+async def create_link(request: Request):
+    body = await request.json()
+    plan = body.get("plan", "7d")
+    price = PRICE_MAP.get(plan)
 
-  res.json({
-    private_url: `${baseUrl}/pay/${session.id}`,
-  });
-});
+    if plan not in PLAN_MAP:
+        return {"error": "Invalid plan"}
+
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    base_url = f"{proto}://{host}"
+
+    return {
+        "message": "create-link route wired",
+        "plan": plan,
+        "price": price,
+        "base_url": base_url
+    }
