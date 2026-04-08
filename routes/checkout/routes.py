@@ -68,6 +68,8 @@ def create_link(body: CreateLinkBody):
 
         price = PRICE_MAP[plan]
 
+        print("STRIPE KEY PREFIX:", stripe.api_key[:8] if stripe.api_key else "NONE")
+
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             mode="payment",
