@@ -25,6 +25,10 @@ PRICE_MAP = {
 class CreateLinkBody(BaseModel):
     plan: str = "7d"
 
+
+# =========================
+# VERIFY SESSION (GET KEY)
+# =========================
 @checkout_routes.get("/verify-session")
 def verify_session(session_id: str):
     try:
@@ -34,19 +38,20 @@ def verify_session(session_id: str):
         session = stripe.checkout.Session.retrieve(session_id)
 
         if session.status != "complete" or session.payment_status != "paid":
-          raise HTTPException(status_code=400, detail="Payment not completed")
+            raise HTTPException(status_code=400, detail="Payment not completed")
 
         import uuid
         api_key = f"ka_{uuid.uuid4().hex}"
-        plan = None
-if session.metadata and "plan" in session.metadata:
-    plan = session.metadata["plan"]
 
-return {
-    "status": "success",
-    "api_key": api_key,
-    "plan": plan
-}
+        plan = None
+        if session.metadata and "plan" in session.metadata:
+            plan = session.metadata["plan"]
+
+        return {
+            "status": "success",
+            "api_key": api_key,
+            "plan": plan
+        }
 
     except HTTPException:
         raise
@@ -54,10 +59,18 @@ return {
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# =========================
+# HEALTH CHECK
+# =========================
 @checkout_routes.get("/")
 def checkout_root():
     return {"service": "checkout running"}
 
+
+# =========================
+# CREATE CHECKOUT LINK
+# =========================
 @checkout_routes.post("/create-link")
 def create_link(body: CreateLinkBody):
     try:
