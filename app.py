@@ -5,8 +5,17 @@ from routes.receiptvault.routes import receipt_routes
 from routes.checkout.routes import checkout_routes
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(clipper_routes, prefix="/api/clipper")
 app.include_router(receipt_routes, prefix="/api/receiptvault")
