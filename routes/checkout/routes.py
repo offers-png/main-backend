@@ -71,7 +71,7 @@ def create_link(body: CreateLinkBody):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"create_link error: {type(e).__name__}: {str(e)}")
 
 
 @checkout_routes.get("/verify-session")
@@ -79,18 +79,26 @@ def verify_session(session_id: str):
     try:
         if not stripe.api_key:
             raise HTTPException(status_code=500, detail="Missing STRIPE_SECRET_KEY")
+
         supabase = get_supabase()
 
         # Idempotent — return existing key if already issued
-        existing = supabase.table("api_keys").select("*").eq("session_id", session_id).execute()
-        if existing.data:
-            row = existing.data[0]
-            return {"status": "success", "api_key": row["key"], "plan": row["plan"], "expires_at": row["expires_at"]}
+        try:
+            existing = supabase.table("api_keys").select("*").eq("session_id", session_id).execute()
+            if existing.data:
+                row = existing.data[0]
+                return {"status": "success", "api_key": row["key"], "plan": row["plan"], "expires_at": row["expires_at"]}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"supabase_lookup error: {type(e).__name__}: {str(e)}")
 
         # Verify with Stripe
-        session = stripe.checkout.Session.retrieve(session_id)
-        if session.status != "complete" or session.payment_status != "paid":
-            raise HTTPException(status_code=400, detail="Payment not completed")
+        try:
+            session = stripe.checkout.Session.retrieve(session_id)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"stripe_retrieve error: {type(e).__name__}: {str(e)}")
+
+        if session.payment_status != "paid":
+            raise HTTPException(status_code=400, detail=f"Payment not completed. Status: {session.payment_status}, session status: {session.status}")
 
         plan = session.metadata.get("plan", "7d") if session.metadata else "7d"
         api_key = f"ka_{uuid.uuid4().hex}"
@@ -98,14 +106,17 @@ def verify_session(session_id: str):
         delta = PLAN_MAP.get(plan)
         expires_at = (now + delta).isoformat() if delta else None
 
-        supabase.table("api_keys").insert({
-            "key": api_key,
-            "session_id": session_id,
-            "plan": plan,
-            "created_at": now.isoformat(),
-            "expires_at": expires_at,
-            "active": True
-        }).execute()
+        try:
+            supabase.table("api_keys").insert({
+                "key": api_key,
+                "session_id": session_id,
+                "plan": plan,
+                "created_at": now.isoformat(),
+                "expires_at": expires_at,
+                "active": True
+            }).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"supabase_insert error: {type(e).__name__}: {str(e)}")
 
         return {"status": "success", "api_key": api_key, "plan": plan, "expires_at": expires_at}
 
@@ -113,7 +124,7 @@ def verify_session(session_id: str):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"verify_session error: {type(e).__name__}: {str(e)}")
 
 
 @checkout_routes.get("/validate-key")
@@ -143,4 +154,4 @@ def validate_key(api_key: str):
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"validate_key error: {type(e).__name__}: {str(e)}")
