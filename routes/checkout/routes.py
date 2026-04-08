@@ -33,17 +33,20 @@ def verify_session(session_id: str):
 
         session = stripe.checkout.Session.retrieve(session_id)
 
-        if session.payment_status != "paid":
-            raise HTTPException(status_code=400, detail="Payment not completed")
+        if session.status != "complete" or session.payment_status != "paid":
+          raise HTTPException(status_code=400, detail="Payment not completed")
 
         import uuid
         api_key = f"ka_{uuid.uuid4().hex}"
+        plan = None
+if session.metadata and "plan" in session.metadata:
+    plan = session.metadata["plan"]
 
-        return {
-            "status": "success",
-            "api_key": api_key,
-            "plan": session.metadata.get("plan")
-        }
+return {
+    "status": "success",
+    "api_key": api_key,
+    "plan": plan
+}
 
     except HTTPException:
         raise
