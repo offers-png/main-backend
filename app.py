@@ -4,6 +4,7 @@ from routes.receiptvault.routes import receipt_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
+from routes.listingai.routes import listingai_routes
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -21,6 +22,7 @@ app.include_router(receipt_routes, prefix="/api/receiptvault")
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")
+app.include_router(listingai_routes, prefix="/listingai")
 
 # Stripe is configured to POST to /api/webhook — alias it here
 @app.post("/api/webhook")
