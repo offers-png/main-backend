@@ -153,8 +153,8 @@ async def listingai_webhook(request: Request, stripe_signature: str = Header(Non
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        email = session.get("metadata", {}).get("email")
-        subscription_id = session.get("subscription")
+        email = session.metadata.get("email") if session.metadata else None
+        subscription_id = session.subscription
         if email:
             supabase.table("listingai_users").update({
                 "plan": "pro",
