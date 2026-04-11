@@ -127,16 +127,17 @@ def create_checkout_session(body: CreateCheckoutRequest):
         supabase.table("listingai_users").update({
             "stripe_customer_id": customer_id
         }).eq("id", user["id"]).execute()
-
+        
     session = stripe.checkout.Session.create(
-        customer=customer_id,
-        payment_method_types=["card"],
-        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
-        mode="subscription",
-        success_url=body.success_url,
-        cancel_url=body.cancel_url,
-        metadata={"email": body.email},
-    )
+    customer=customer_id,
+    payment_method_types=["card"],
+    line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+    mode="subscription",
+    success_url=body.success_url,
+    cancel_url=body.cancel_url,
+    metadata={"email": body.email},
+    allow_promotion_codes=True,   # ← ADD THIS LINE
+)
     return {"url": session.url}
 
 
