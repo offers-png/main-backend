@@ -33,6 +33,10 @@ class CreateCheckoutRequest(BaseModel):
 class UserCreate(BaseModel):
     email: str
 
+class PortalRequest(BaseModel):
+    email: str
+    return_url: str
+
 
 def get_or_create_user(email: str) -> dict:
     res = supabase.table("listingai_users").select("*").eq("email", email).execute()
@@ -127,17 +131,30 @@ def create_checkout_session(body: CreateCheckoutRequest):
         supabase.table("listingai_users").update({
             "stripe_customer_id": customer_id
         }).eq("id", user["id"]).execute()
-        
+
     session = stripe.checkout.Session.create(
-    customer=customer_id,
-    payment_method_types=["card"],
-    line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
-    mode="subscription",
-    success_url=body.success_url,
-    cancel_url=body.cancel_url,
-    metadata={"email": body.email},
-    allow_promotion_codes=True,   # ← ADD THIS LINE
-)
+        customer=customer_id,
+        payment_method_types=["card"],
+        line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+        mode="subscription",
+        success_url=body.success_url,
+        cancel_url=body.cancel_url,
+        metadata={"email": body.email},
+        allow_promotion_codes=True,
+    )
+    return {"url": session.url}
+
+
+@listingai_routes.post("/create-portal-session")
+def create_portal_session(body: PortalRequest):
+    user = get_or_create_user(body.email)
+    customer_id = user.get("stripe_customer_id")
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="No subscription found")
+    session = stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url=body.return_url,
+    )
     return {"url": session.url}
 
 
