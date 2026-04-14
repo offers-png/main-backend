@@ -10,13 +10,13 @@ from datetime import datetime, date
 import os
 import httpx
 import stripe
-from supabase import create_client
+from supabase import create_clienth
 
 # ── Supabase & Stripe clients ──────────────────────────────────────────────────
 supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
 stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")  # set after creating product
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET_gigledger", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID_gigledger", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 gig_router = APIRouter(tags=["GigLedger"])
