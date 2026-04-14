@@ -6,7 +6,7 @@ from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
 from routes.listingai.routes import listingai_routes
 from fastapi.middleware.cors import CORSMiddleware
-from gig_routes import router as gig_router
+from routes.gigledger.routes import gig_router
 
 app = FastAPI()
 
