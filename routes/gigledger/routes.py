@@ -10,7 +10,7 @@ from datetime import datetime, date
 import os
 import httpx
 import stripe
-from supabase import create_clienth
+from supabase import create_client
 
 # ── Supabase & Stripe clients ──────────────────────────────────────────────────
 supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
