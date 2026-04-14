@@ -74,28 +74,23 @@ def create_link(body: CreateLinkBody):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"create_link error: {type(e).__name__}: {str(e)}")
 
-
 @checkout_routes.post("/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    if not WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Missing webhook secret")
+
     try:
-        # Try with secret first, fall back to raw parse if secret missing/wrong
-        if WEBHOOK_SECRET:
-            try:
-                event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
-                event = event.to_dict_recursive() if hasattr(event, 'to_dict_recursive') else dict(event)
-            except stripe.error.SignatureVerificationError:
-                # Secret mismatch — parse without verification (safe since we control the endpoint)
-                import json
-                event = json.loads(payload)
-                print("WARNING: Webhook signature verification failed, processing anyway")
-        else:
-            import json
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(payload, sig_header, WEBHOOK_SECRET)
+        event = dict(event)
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Webhook parse error: {str(e)}")
+
+    # rest of your code unchanged...
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
