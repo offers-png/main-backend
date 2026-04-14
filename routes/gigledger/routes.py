@@ -19,7 +19,7 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")  # set after creating product
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-gig_router = APIRouter(prefix="/gig", tags=["GigLedger"])
+gig_router = APIRouter(tags=["GigLedger"])
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
