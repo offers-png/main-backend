@@ -8,6 +8,7 @@ from routes.listingai.routes import listingai_routes
 from fastapi.middleware.cors import CORSMiddleware
 from routes.gigledger.routes import gig_router
 from routes.gigledger.mileage import mileage_router
+from routes.tariff.routes import router as tariff_router
 
 app = FastAPI()
 
@@ -27,6 +28,7 @@ app.include_router(mobile_routes, prefix="/api/mobile")
 app.include_router(listingai_routes, prefix="/listingai")
 app.include_router(gig_router, prefix="/gig")
 app.include_router(mileage_router)
+app.include_router(tariff_router)
 
 # Stripe is configured to POST to /api/webhook — alias it here
 @app.post("/api/webhook")
