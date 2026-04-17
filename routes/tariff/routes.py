@@ -6,6 +6,12 @@ import httpx
 from datetime import datetime, timedelta
 import stripe
 
+import hashlib
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
 router = APIRouter(prefix="/tariff", tags=["tariff"])
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -31,6 +37,7 @@ class CreateUserRequest(BaseModel):
     email: str
     business_name: Optional[str] = None
     business_type: Optional[str] = None
+    password: Optional[str] = None
 
 class AddProductRequest(BaseModel):
     user_id: str
@@ -54,6 +61,13 @@ class CheckoutRequest(BaseModel):
 
 class ApplyPriceRequest(BaseModel):
     product_id: str
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CancelRequest(BaseModel):
+    user_id: str
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -137,6 +151,8 @@ async def create_user(req: CreateUserRequest):
         "business_type": req.business_type,
         "plan": "free"
     }
+    if hasattr(req, 'password') and req.password:
+        user_data["password_hash"] = hash_password(req.password)
     result = await sb_post("tariff_users", user_data)
     if isinstance(result, list) and result:
         return result[0]
@@ -360,6 +376,50 @@ Be specific with dollar amounts and percentages. Be direct and practical."""
         "avg_margin_before": orig_margin,
         "avg_margin_after": curr_margin
     }
+
+
+@router.post("/login")
+async def login_user(req: LoginRequest):
+    users = await sb_get(f"tariff_users?email=eq.{req.email}&select=*")
+    if not users:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    user = users[0]
+
+    # Check password
+    stored_hash = user.get("password_hash")
+    if not stored_hash:
+        # Legacy user with no password — allow login, prompt to set password
+        pass
+    else:
+        if hash_password(req.password) != stored_hash:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    unread = await sb_get(f"tariff_alerts?user_id=eq.{user['id']}&read=eq.false&select=id")
+    user["unread_alert_count"] = len(unread)
+    return user
+
+
+@router.post("/cancel")
+async def cancel_subscription(req: CancelRequest):
+    user_list = await sb_get(f"tariff_users?id=eq.{req.user_id}&select=*")
+    if not user_list:
+        raise HTTPException(status_code=404, detail="User not found")
+    user = user_list[0]
+
+    # Cancel in Stripe if they have a subscription
+    sub_id = user.get("stripe_subscription_id")
+    if sub_id:
+        try:
+            stripe.Subscription.cancel(sub_id)
+        except Exception as e:
+            pass  # Log but don't fail — still downgrade locally
+
+    # Downgrade to free
+    await sb_patch(f"tariff_users?id=eq.{req.user_id}", {
+        "plan": "free",
+        "stripe_subscription_id": None
+    })
+    return {"status": "cancelled", "plan": "free"}
 
 
 @router.post("/checkout")
