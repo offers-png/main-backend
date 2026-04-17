@@ -1,0 +1,9 @@
+{
+  "name": "sal-ai-voice-server",
+  "version": "1.0.0",
+  "description": "Real-time conversational AI voice for Sal AI outbound calls",
+  "main": "voice_server.js",
+  "scripts": { "start": "node voice_server.js" },
+  "dependencies": { "express": "^4.18.2", "ws": "^8.16.0" },
+  "engines": { "node": ">=18.0.0" }
+}
