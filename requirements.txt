@@ -1,7 +1,13 @@
 fastapi
 uvicorn
-stripe>=12.0.0
+stripe==12.0.0
 supabase
 python-dotenv
 httpx
 anthropic
+
+# competitor engine deps
+beautifulsoup4
+requests
+lxml
+tldextract
