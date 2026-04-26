@@ -10,6 +10,7 @@ from routes.listingai.routes import listingai_routes
 from routes.gigledger.routes import gig_router
 from routes.gigledger.mileage import mileage_router
 from routes.tariff.routes import router as tariff_router
+from routes.scanpass.routes import scanpass_routes, scanpass_stripe_webhook
 
 app = FastAPI()
 
@@ -30,6 +31,7 @@ app.include_router(listingai_routes, prefix="/listingai")
 app.include_router(gig_router, prefix="/gig")
 app.include_router(mileage_router)
 app.include_router(tariff_router)
+app.include_router(scanpass_routes, prefix="/api")
 
 # TEMP in-memory auth storage just to get signup/login working
 USERS = {}
@@ -93,6 +95,10 @@ async def logout():
 @app.post("/api/webhook")
 async def webhook_alias(request: Request):
     return await stripe_webhook(request)
+
+@app.post("/api/scanpass/stripe/webhook")
+async def scanpass_webhook_alias(request: Request):
+    return await scanpass_stripe_webhook(request)
 
 @app.get("/")
 def root():
