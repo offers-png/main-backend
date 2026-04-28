@@ -11,6 +11,7 @@ from routes.gigledger.routes import gig_router
 from routes.gigledger.mileage import mileage_router
 from routes.tariff.routes import router as tariff_router
 from routes.scanpass.routes import scanpass_routes, scanpass_stripe_webhook
+from routes.genid.routes import genid_routes
 
 app = FastAPI()
 
@@ -32,6 +33,7 @@ app.include_router(gig_router, prefix="/gig")
 app.include_router(mileage_router)
 app.include_router(tariff_router)
 app.include_router(scanpass_routes, prefix="/api")
+app.include_router(genid_routes, prefix="/api/genid")
 
 # TEMP in-memory auth storage just to get signup/login working
 USERS = {}
