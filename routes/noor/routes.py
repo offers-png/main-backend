@@ -1,0 +1,505 @@
+# ============================================================
+#  USTADHA NOOR — Islamic AI Teacher Backend
+#  Add this file to your project, then include the router in
+#  your main.py:  app.include_router(noor_router)
+# ============================================================
+
+import os, base64, io, uuid, datetime, httpx
+from typing import Optional, List
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from supabase import create_client, Client
+
+# ── Config ────────────────────────────────────────────────
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+ANTHROPIC_KEY = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_KEY    = os.environ.get("OPENAI_API_KEY", "")  # for Whisper
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+noor_router = APIRouter(prefix="/noor", tags=["Ustadha Noor"])
+
+# ── Strict Islamic-only system prompt ────────────────────
+NOOR_SYSTEM = """You are Ustadha Noor, an autonomous AI Islamic classroom teacher for Muslim children aged 7-10.
+
+STRICT RULES — NEVER BREAK THESE:
+1. You ONLY discuss Islamic topics: Arabic language, Quran, Tajweed, Islamic Studies, Duas, Prophets, Pillars of Islam, Pillars of Iman.
+2. If a child asks ANYTHING off-topic (games, TV, food, anything non-Islamic), say: "That's not part of our lesson. Let's stay focused! 😊" and redirect immediately.
+3. NEVER discuss politics, violence, other religions in a negative way, inappropriate content, or anything haram.
+4. NEVER break character. You are always Ustadha Noor, always teaching.
+5. You run the classroom alone. No parent needed.
+
+CLASSROOM BEHAVIOR:
+- Keep every response under 60 words. You speak aloud on a phone.
+- Always end with a question or instruction to keep child engaged.
+- Say "Mashallah!" and "Ahsant!" for good answers.
+- Be warm, patient, encouraging. Never shame a child for mistakes.
+- If child is silent 10+ seconds, prompt them gently.
+
+VISION ALERTS [prefixed with VISION:]:
+- React naturally. Don't say "I got a vision alert."
+- Distracted → call them back kindly
+- Cheating during recitation → catch it firmly but kindly
+- Attentive → praise them
+
+LESSON FLOW:
+1. Greet, learn child's name, ask what to study
+2. Teach in small chunks, always check understanding
+3. Mix: Arabic → Quran → Story → Dua → back to Arabic
+
+TOPICS:
+- Arabic: letters (alef to ya), words, simple sentences
+- Quran: Al-Fatiha, Al-Ikhlas, Al-Falaq, An-Nas, Al-Kawthar, Al-Asr — recitation + meaning
+- Islamic Studies: 5 Pillars, 6 Pillars of Iman, stories of Prophets Adam, Ibrahim, Musa, Isa, Muhammad ﷺ
+- Duas: waking up, sleeping, eating, entering home, leaving home, before study
+
+PRONUNCIATION FEEDBACK (when given transcript of recitation):
+- Compare to correct Arabic pronunciation
+- Point out specific mistakes gently
+- Give the correct pronunciation with transliteration
+- Never say a recitation is perfect unless it truly is
+
+Max 60 words per response always. No exceptions."""
+
+# ── Models ────────────────────────────────────────────────
+class ChatMessage(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    student_id: Optional[str] = None
+    lesson_id: Optional[str] = None
+    message: str
+    image_b64: Optional[str] = None   # JPEG base64 from camera
+    mode: str = "TEACHING"            # TEACHING | RECITATION | HOMEWORK | VISION
+    history: List[ChatMessage] = []
+
+class VisionRequest(BaseModel):
+    student_id: Optional[str] = None
+    lesson_id: Optional[str] = None
+    image_b64: str
+    mode: str = "TEACHING"  # TEACHING | RECITATION
+
+class TranscribeRequest(BaseModel):
+    student_id: Optional[str] = None
+    lesson_id: Optional[str] = None
+    audio_b64: str          # base64 encoded audio (webm or mp4)
+    surah: Optional[str] = None
+
+class StudentCreate(BaseModel):
+    name: str
+    age: Optional[int] = None
+    level: str = "beginner"
+
+class ProgressUpdate(BaseModel):
+    student_id: str
+    surah_memorized: Optional[str] = None
+    surah_in_progress: Optional[str] = None
+    dua_learned: Optional[str] = None
+    arabic_level: Optional[int] = None
+    lesson_minutes: Optional[int] = None
+
+class StartLesson(BaseModel):
+    student_id: str
+
+class EndLesson(BaseModel):
+    lesson_id: str
+    student_id: str
+    topics_covered: List[str] = []
+    summary: Optional[str] = None
+
+# ── Helper: call Claude ───────────────────────────────────
+async def call_claude(messages: list, max_tokens: int = 300) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": max_tokens,
+                "system": NOOR_SYSTEM,
+                "messages": messages,
+            }
+        )
+        if resp.status_code != 200:
+            raise HTTPException(500, f"Claude error: {resp.text}")
+        return resp.json()["content"][0]["text"]
+
+# ── Helper: build image content block ────────────────────
+def image_block(b64: str) -> dict:
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+    }
+
+# ── Helper: log attention event ──────────────────────────
+def log_attention(student_id: str, lesson_id: str, event_type: str, description: str):
+    try:
+        supabase.table("noor_attention_log").insert({
+            "student_id": student_id,
+            "lesson_id": lesson_id,
+            "event_type": event_type,
+            "description": description,
+        }).execute()
+    except Exception:
+        pass  # Non-critical, don't crash
+
+# ═══════════════════════════════════════════════════════════
+#  ROUTES
+# ═══════════════════════════════════════════════════════════
+
+# ── POST /noor/chat ───────────────────────────────────────
+@noor_router.post("/chat")
+async def chat(req: ChatRequest):
+    """Main chat endpoint. Handles text + optional camera image."""
+
+    # Build message history for Claude
+    claude_msgs = []
+    for m in req.history[-14:]:  # last 7 turns
+        claude_msgs.append({"role": m.role, "content": m.content})
+
+    # Build current user message
+    mode_tag = f"[MODE: {req.mode}]"
+    if req.image_b64:
+        user_content = [
+            image_block(req.image_b64),
+            {"type": "text", "text": f"{mode_tag} {req.message}"}
+        ]
+    else:
+        user_content = f"{mode_tag} {req.message}"
+
+    claude_msgs.append({"role": "user", "content": user_content})
+
+    reply = await call_claude(claude_msgs)
+
+    # Log to lesson if we have IDs
+    if req.student_id and req.lesson_id:
+        try:
+            supabase.table("noor_lessons").update({
+                "notes": f"Last message: {req.message[:100]}"
+            }).eq("id", req.lesson_id).execute()
+        except Exception:
+            pass
+
+    return {"reply": reply, "mode": req.mode}
+
+
+# ── POST /noor/vision ─────────────────────────────────────
+@noor_router.post("/vision")
+async def vision_check(req: VisionRequest):
+    """
+    Silent background camera check every ~9 seconds.
+    Returns: event_type + optional teacher_response.
+    """
+    is_recitation = req.mode == "RECITATION"
+
+    if is_recitation:
+        prompt = ("Look at this child carefully. "
+                  "Is the child looking at a book, paper, or phone screen? "
+                  "Are they looking at the camera or looking away? "
+                  "Reply with JSON only: "
+                  '{\"attention\": \"focused|distracted|absent\", '
+                  '\"cheating\": true|false, '
+                  '\"description\": \"one sentence\"}')
+    else:
+        prompt = ("Look at this child. "
+                  "Are they paying attention, distracted, or not visible? "
+                  "Reply with JSON only: "
+                  '{\"attention\": \"focused|distracted|absent\", '
+                  '\"cheating\": false, '
+                  '\"description\": \"one sentence\"}')
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 120,
+                "messages": [{
+                    "role": "user",
+                    "content": [image_block(req.image_b64), {"type": "text", "text": prompt}]
+                }]
+            }
+        )
+
+    raw = resp.json()["content"][0]["text"].strip()
+
+    # Parse JSON safely
+    import json, re
+    try:
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        data = json.loads(match.group()) if match else {}
+    except Exception:
+        data = {}
+
+    attention   = data.get("attention", "focused")
+    cheating    = data.get("cheating", False)
+    description = data.get("description", "")
+
+    teacher_response = None
+    event_type = "attentive"
+
+    if cheating and is_recitation:
+        event_type = "cheating"
+        teacher_response = await call_claude([{
+            "role": "user",
+            "content": f"[VISION: Child appears to be looking at a book or paper during Quran recitation. Catch them kindly but firmly.]"
+        }])
+    elif attention == "distracted":
+        event_type = "distracted"
+        teacher_response = await call_claude([{
+            "role": "user",
+            "content": "[VISION: Child is distracted, looking away from camera. Call them back to attention gently.]"
+        }])
+    elif attention == "absent":
+        event_type = "absent"
+        teacher_response = await call_claude([{
+            "role": "user",
+            "content": "[VISION: Child is not visible or has left the camera view.]"
+        }])
+
+    # Log event
+    if req.student_id and req.lesson_id and event_type != "attentive":
+        log_attention(req.student_id, req.lesson_id, event_type, description)
+
+    return {
+        "event_type": event_type,
+        "attention": attention,
+        "cheating": cheating,
+        "description": description,
+        "teacher_response": teacher_response,
+    }
+
+
+# ── POST /noor/transcribe ─────────────────────────────────
+@noor_router.post("/transcribe")
+async def transcribe_recitation(req: TranscribeRequest):
+    """
+    Transcribe audio via Whisper, then score Quran pronunciation.
+    Expects base64 audio (webm/mp4).
+    """
+    if not OPENAI_KEY:
+        raise HTTPException(400, "OPENAI_API_KEY not set — Whisper unavailable")
+
+    # Decode audio
+    audio_bytes = base64.b64decode(req.audio_b64)
+
+    # Send to Whisper
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {OPENAI_KEY}"},
+            files={"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")},
+            data={"model": "whisper-1", "language": "ar"}
+        )
+        if resp.status_code != 200:
+            raise HTTPException(500, f"Whisper error: {resp.text}")
+
+    transcript = resp.json().get("text", "")
+
+    # Score pronunciation with Claude
+    surah_context = f"The child is reciting {req.surah}. " if req.surah else ""
+    score_prompt = (
+        f"{surah_context}The child recited: \"{transcript}\"\n"
+        "Evaluate the Quran recitation. Point out any pronunciation or tajweed mistakes "
+        "with the correct version. Be kind and specific. Max 3 corrections at a time."
+    )
+
+    feedback = await call_claude([{"role": "user", "content": score_prompt}])
+
+    return {
+        "transcript": transcript,
+        "feedback": feedback,
+        "surah": req.surah,
+    }
+
+
+# ── POST /noor/homework ───────────────────────────────────
+@noor_router.post("/homework")
+async def grade_homework(student_id: str, image_b64: str, lesson_id: Optional[str] = None):
+    """Grade homework from camera image."""
+
+    prompt = (
+        "[HOMEWORK SCAN] Read this homework carefully. "
+        "Identify the subject (Arabic writing, Quran, Islamic studies). "
+        "Grade it: what is correct, what needs fixing. "
+        "Be specific, kind, and encouraging. Give a score out of 100."
+    )
+
+    feedback = await call_claude([{
+        "role": "user",
+        "content": [image_block(image_b64), {"type": "text", "text": prompt}]
+    }], max_tokens=400)
+
+    # Determine grade
+    import re
+    score_match = re.search(r'(\d+)\s*/\s*100', feedback)
+    score = int(score_match.group(1)) if score_match else None
+    grade = "excellent" if (score or 0) >= 85 else "good" if (score or 0) >= 60 else "needs_work"
+
+    # Save to DB
+    record = {
+        "student_id": student_id,
+        "feedback": feedback,
+        "grade": grade,
+        "score": score,
+    }
+    result = supabase.table("noor_homework").insert(record).execute()
+    hw_id = result.data[0]["id"] if result.data else None
+
+    return {"feedback": feedback, "grade": grade, "score": score, "homework_id": hw_id}
+
+
+# ── POST /noor/students ───────────────────────────────────
+@noor_router.post("/students")
+async def create_student(s: StudentCreate):
+    """Create a new student profile."""
+    result = supabase.table("noor_students").insert({
+        "name": s.name,
+        "age": s.age,
+        "level": s.level,
+    }).execute()
+    student = result.data[0]
+
+    # Create blank progress record
+    supabase.table("noor_progress").insert({
+        "student_id": student["id"]
+    }).execute()
+
+    return student
+
+
+# ── GET /noor/students ────────────────────────────────────
+@noor_router.get("/students")
+async def list_students():
+    result = supabase.table("noor_students").select("*").order("created_at").execute()
+    return result.data
+
+
+# ── GET /noor/student/{id} ────────────────────────────────
+@noor_router.get("/student/{student_id}")
+async def get_student(student_id: str):
+    """Load student profile + progress + recent lessons."""
+    student = supabase.table("noor_students").select("*").eq("id", student_id).single().execute().data
+    progress = supabase.table("noor_progress").select("*").eq("student_id", student_id).maybe_single().execute().data
+    lessons = supabase.table("noor_lessons").select("*").eq("student_id", student_id).order("started_at", desc=True).limit(10).execute().data
+    homework = supabase.table("noor_homework").select("*").eq("student_id", student_id).order("submitted_at", desc=True).limit(5).execute().data
+
+    return {
+        "student": student,
+        "progress": progress,
+        "recent_lessons": lessons,
+        "recent_homework": homework,
+    }
+
+
+# ── POST /noor/lesson/start ───────────────────────────────
+@noor_router.post("/lesson/start")
+async def start_lesson(req: StartLesson):
+    """Start a new lesson session. Returns lesson_id."""
+    result = supabase.table("noor_lessons").insert({
+        "student_id": req.student_id,
+    }).execute()
+    lesson_id = result.data[0]["id"]
+
+    # Update progress last_lesson_at
+    supabase.table("noor_progress").update({
+        "last_lesson_at": datetime.datetime.utcnow().isoformat()
+    }).eq("student_id", req.student_id).execute()
+
+    return {"lesson_id": lesson_id}
+
+
+# ── POST /noor/lesson/end ─────────────────────────────────
+@noor_router.post("/lesson/end")
+async def end_lesson(req: EndLesson):
+    """End lesson, save duration + summary."""
+    lesson = supabase.table("noor_lessons").select("started_at").eq("id", req.lesson_id).single().execute().data
+    started = datetime.datetime.fromisoformat(lesson["started_at"].replace("Z", "+00:00"))
+    ended = datetime.datetime.now(datetime.timezone.utc)
+    duration = int((ended - started).total_seconds())
+    minutes = duration // 60
+
+    supabase.table("noor_lessons").update({
+        "ended_at": ended.isoformat(),
+        "duration_seconds": duration,
+        "topics_covered": req.topics_covered,
+        "summary": req.summary,
+    }).eq("id", req.lesson_id).execute()
+
+    # Update total stats
+    prog = supabase.table("noor_progress").select("total_lessons,total_minutes").eq("student_id", req.student_id).single().execute().data
+    supabase.table("noor_progress").update({
+        "total_lessons": (prog["total_lessons"] or 0) + 1,
+        "total_minutes": (prog["total_minutes"] or 0) + minutes,
+        "updated_at": ended.isoformat(),
+    }).eq("student_id", req.student_id).execute()
+
+    return {"duration_seconds": duration, "minutes": minutes}
+
+
+# ── POST /noor/progress ───────────────────────────────────
+@noor_router.post("/progress")
+async def update_progress(req: ProgressUpdate):
+    """Update student progress after lesson."""
+    prog = supabase.table("noor_progress").select("*").eq("student_id", req.student_id).single().execute().data
+
+    updates = {"updated_at": datetime.datetime.utcnow().isoformat()}
+
+    if req.surah_memorized:
+        memorized = set(prog.get("surahs_memorized") or [])
+        memorized.add(req.surah_memorized)
+        in_progress = set(prog.get("surahs_in_progress") or [])
+        in_progress.discard(req.surah_memorized)
+        updates["surahs_memorized"] = list(memorized)
+        updates["surahs_in_progress"] = list(in_progress)
+
+    if req.surah_in_progress:
+        in_progress = set(prog.get("surahs_in_progress") or [])
+        in_progress.add(req.surah_in_progress)
+        updates["surahs_in_progress"] = list(in_progress)
+
+    if req.dua_learned:
+        duas = set(prog.get("duas_learned") or [])
+        duas.add(req.dua_learned)
+        updates["duas_learned"] = list(duas)
+
+    if req.arabic_level is not None:
+        updates["arabic_level"] = max(0, min(100, req.arabic_level))
+
+    if req.lesson_minutes:
+        updates["total_minutes"] = (prog.get("total_minutes") or 0) + req.lesson_minutes
+
+    supabase.table("noor_progress").update(updates).eq("student_id", req.student_id).execute()
+    return {"updated": True}
+
+
+# ── GET /noor/progress/{student_id} ──────────────────────
+@noor_router.get("/progress/{student_id}")
+async def get_progress(student_id: str):
+    result = supabase.table("noor_progress").select("*").eq("student_id", student_id).single().execute()
+    return result.data
+
+
+# ── GET /noor/homework/{student_id} ──────────────────────
+@noor_router.get("/homework/{student_id}")
+async def get_homework(student_id: str):
+    result = supabase.table("noor_homework").select("*").eq("student_id", student_id).order("submitted_at", desc=True).execute()
+    return result.data
+
+
+# ── GET /noor/attention/{lesson_id} ──────────────────────
+@noor_router.get("/attention/{lesson_id}")
+async def get_attention_log(lesson_id: str):
+    result = supabase.table("noor_attention_log").select("*").eq("lesson_id", lesson_id).order("logged_at").execute()
+    return result.data
