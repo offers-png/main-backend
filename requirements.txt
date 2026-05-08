@@ -5,6 +5,7 @@ supabase
 python-dotenv
 httpx
 anthropic
+python-multipart
 
 # competitor engine deps
 beautifulsoup4
