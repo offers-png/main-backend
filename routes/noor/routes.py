@@ -503,3 +503,193 @@ async def get_homework(student_id: str):
 async def get_attention_log(lesson_id: str):
     result = supabase.table("noor_attention_log").select("*").eq("lesson_id", lesson_id).order("logged_at").execute()
     return result.data
+
+
+# ═══════════════════════════════════════════════════════════
+#  PARENT NOTES
+# ═══════════════════════════════════════════════════════════
+
+class ParentNoteCreate(BaseModel):
+    student_id: str
+    notes: str
+    focus_topics: Optional[List[str]] = []
+
+@noor_router.post("/parent-notes")
+async def save_parent_notes(req: ParentNoteCreate):
+    result = supabase.table("noor_parent_notes").insert({
+        "student_id": req.student_id,
+        "notes": req.notes,
+        "focus_topics": req.focus_topics,
+    }).execute()
+    return result.data[0]
+
+@noor_router.get("/parent-notes/{student_id}")
+async def get_parent_notes(student_id: str):
+    # Get most recent unused note, or latest
+    result = supabase.table("noor_parent_notes")\
+        .select("*")\
+        .eq("student_id", student_id)\
+        .order("created_at", desc=True)\
+        .limit(1)\
+        .execute()
+    return result.data[0] if result.data else None
+
+@noor_router.patch("/parent-notes/{note_id}/used")
+async def mark_note_used(note_id: str):
+    supabase.table("noor_parent_notes").update({"used": True}).eq("id", note_id).execute()
+    return {"marked": True}
+
+
+# ═══════════════════════════════════════════════════════════
+#  HAND RAISE DETECTION
+# ═══════════════════════════════════════════════════════════
+
+class HandRaiseRequest(BaseModel):
+    student_id: Optional[str] = None
+    lesson_id: Optional[str] = None
+    session_id: Optional[str] = None
+    image_b64: str
+
+@noor_router.post("/hand-raise")
+async def detect_hand_raise(req: HandRaiseRequest):
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 10,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        image_block(req.image_b64),
+                        {"type": "text", "text": "Is the child raising their hand or arm up? Answer only: yes or no"}
+                    ]
+                }]
+            }
+        )
+    text = resp.json()["content"][0]["text"].strip().lower()
+    raised = "yes" in text
+
+    if raised and req.student_id and req.lesson_id:
+        try:
+            supabase.table("noor_hand_raises").insert({
+                "lesson_id": req.lesson_id,
+                "student_id": req.student_id,
+                "session_id": req.session_id,
+            }).execute()
+            # Increment hand_raises on session
+            if req.session_id:
+                sess = supabase.table("noor_sessions").select("hand_raises").eq("id", req.session_id).single().execute().data
+                supabase.table("noor_sessions").update({
+                    "hand_raises": (sess.get("hand_raises") or 0) + 1
+                }).eq("id", req.session_id).execute()
+        except Exception:
+            pass
+
+    return {"raised": raised}
+
+
+# ═══════════════════════════════════════════════════════════
+#  TRANSCRIPTS
+# ═══════════════════════════════════════════════════════════
+
+class TranscriptEntry(BaseModel):
+    lesson_id: str
+    student_id: str
+    session_id: Optional[str] = None
+    speaker: str  # 'teacher' | 'student'
+    message: str
+    mode: str = "TEACHING"
+
+@noor_router.post("/transcript/add")
+async def add_transcript_entry(req: TranscriptEntry):
+    result = supabase.table("noor_transcripts").insert({
+        "lesson_id": req.lesson_id,
+        "student_id": req.student_id,
+        "session_id": req.session_id,
+        "speaker": req.speaker,
+        "message": req.message,
+        "mode": req.mode,
+    }).execute()
+    return result.data[0]
+
+@noor_router.get("/transcript/{lesson_id}")
+async def get_transcript(lesson_id: str):
+    result = supabase.table("noor_transcripts")\
+        .select("*")\
+        .eq("lesson_id", lesson_id)\
+        .order("timestamp")\
+        .execute()
+    return result.data
+
+
+# ═══════════════════════════════════════════════════════════
+#  SESSIONS
+# ═══════════════════════════════════════════════════════════
+
+class SessionStart(BaseModel):
+    lesson_id: str
+    student_id: str
+
+class SessionEnd(BaseModel):
+    session_id: str
+    lesson_id: str
+    student_id: str
+    duration_seconds: Optional[int] = None
+    recording_url: Optional[str] = None
+    attention_score: Optional[int] = None
+    cheating_attempts: Optional[int] = 0
+
+@noor_router.post("/session/start")
+async def start_session(req: SessionStart):
+    result = supabase.table("noor_sessions").insert({
+        "lesson_id": req.lesson_id,
+        "student_id": req.student_id,
+    }).execute()
+    return result.data[0]
+
+@noor_router.post("/session/end")
+async def end_session(req: SessionEnd):
+    ended = datetime.datetime.now(datetime.timezone.utc)
+    updates = {
+        "ended_at": ended.isoformat(),
+        "cheating_attempts": req.cheating_attempts,
+    }
+    if req.duration_seconds: updates["duration_seconds"] = req.duration_seconds
+    if req.recording_url: updates["recording_url"] = req.recording_url
+    if req.attention_score is not None: updates["attention_score"] = req.attention_score
+
+    # Auto-generate transcript summary
+    try:
+        transcript = supabase.table("noor_transcripts")\
+            .select("speaker,message")\
+            .eq("lesson_id", req.lesson_id)\
+            .order("timestamp")\
+            .execute().data
+        if transcript:
+            convo = "\n".join([f"{t['speaker'].upper()}: {t['message']}" for t in transcript[-20:]])
+            summary = await call_claude([{
+                "role": "user",
+                "content": f"Summarize this Islamic lesson in 2-3 sentences for a parent report. What was covered, how did the student do?\n\n{convo}"
+            }], max_tokens=150)
+            updates["transcript_summary"] = summary
+    except Exception:
+        pass
+
+    supabase.table("noor_sessions").update(updates).eq("id", req.session_id).execute()
+    return {"ended": True}
+
+@noor_router.get("/sessions/{student_id}")
+async def get_sessions(student_id: str):
+    result = supabase.table("noor_sessions")\
+        .select("*")\
+        .eq("student_id", student_id)\
+        .order("started_at", desc=True)\
+        .limit(20)\
+        .execute()
+    return result.data
