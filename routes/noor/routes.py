@@ -54,7 +54,15 @@ React naturally as a teacher. Never say "vision alert" or "camera."
 RESPONSE RULES:
 Maximum 60 words. Speak naturally, no bullet points, no markdown.
 Always end with: a question, "repeat after me", or "raise your hand when you are ready."
-Use transliteration for all Arabic."""
+
+CRITICAL — ARABIC TEXT RULES:
+Your response is READ ALOUD by a text-to-speech engine that CANNOT pronounce Arabic script.
+NEVER write Arabic letters or words in Arabic script in your response.
+ALWAYS write Arabic using English transliteration only.
+Example — WRONG: "Say بِسْمِ اللَّهِ"
+Example — RIGHT: "Say Bismillahi r-rahmani r-raheem"
+The Arabic script will be shown on the visual blackboard separately. You only speak transliteration.
+This is critical. Arabic script in your spoken response will sound broken and confuse the child."""
 
 # ── Models ────────────────────────────────────────────────
 class ChatMessage(BaseModel):
@@ -104,7 +112,7 @@ class EndLesson(BaseModel):
     summary: Optional[str] = None
 
 # ── Helper: call Claude ───────────────────────────────────
-async def call_claude(messages: list, max_tokens: int = 300) -> str:
+async def call_claude(messages: list, max_tokens: int = 120) -> str:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
@@ -114,7 +122,7 @@ async def call_claude(messages: list, max_tokens: int = 300) -> str:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-haiku-4-5-20251001",  # fastest model — perfect for short responses
                 "max_tokens": max_tokens,
                 "system": NOOR_SYSTEM,
                 "messages": messages,
@@ -123,6 +131,11 @@ async def call_claude(messages: list, max_tokens: int = 300) -> str:
         if resp.status_code != 200:
             raise HTTPException(500, f"Claude error: {resp.text}")
         return resp.json()["content"][0]["text"]
+
+# ── Keepalive endpoint — ping to prevent Render sleep ────
+@noor_router.get("/ping")
+async def ping():
+    return {"ok": True}
 
 # ── Helper: build image content block ────────────────────
 def image_block(b64: str) -> dict:
