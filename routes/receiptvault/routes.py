@@ -111,9 +111,13 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         "owner_name": body.ownerName,
         "owner_address": body.ownerAddress,
     }
-    result = supabase.table("businesses").insert(data).execute()
+    existing = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    if existing.data:
+        result = supabase.table("businesses").update(data).eq("id", existing.data[0]["id"]).execute()
+    else:
+        result = supabase.table("businesses").insert(data).execute()
     if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to create business")
+        raise HTTPException(status_code=500, detail="Failed to save business")
     return to_business(result.data[0])
 
 
