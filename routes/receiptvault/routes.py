@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, HTTPException, Depends, Header, Request
+from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -7,6 +7,7 @@ import httpx
 import base64 as b64lib
 import time
 import random
+import json
 
 from supabase import create_client, Client
 
@@ -14,6 +15,7 @@ receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
 _supabase_client = None
 
+CATEGORIES = ["Meals & Entertainment", "Travel", "Office Supplies", "Utilities", "Software & Subscriptions", "Advertising", "Vehicle & Fuel", "Equipment", "Other"]
 
 def get_supabase() -> Client:
     global _supabase_client
@@ -66,9 +68,84 @@ def to_receipt(row: dict) -> dict:
         "businessId": row.get("business_id"),
         "filePath": row.get("file_path"),
         "originalName": row.get("original_name"),
+        "merchant": row.get("merchant"),
+        "amount": row.get("amount"),
+        "receiptDate": row.get("receipt_date"),
+        "category": row.get("category"),
+        "notes": row.get("notes"),
         "uploadedAt": str(row.get("uploaded_at", "")),
         "sentAt": str(row.get("sent_at")) if row.get("sent_at") else None,
     }
+
+
+async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
+    """Use Claude Vision to extract merchant, amount, date, category from receipt image."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {}
+
+    # Claude Vision only supports images, not PDFs
+    if "pdf" in mime_type:
+        return {}
+
+    prompt = f"""You are a receipt parser. Extract the following from this receipt image and return ONLY valid JSON, nothing else:
+{{
+  "merchant": "store or restaurant name",
+  "amount": 12.99,
+  "receipt_date": "YYYY-MM-DD",
+  "category": "one of: {', '.join(CATEGORIES)}"
+}}
+
+Rules:
+- amount must be a number (total amount paid, no $ sign)
+- receipt_date must be YYYY-MM-DD format or null if not found
+- category must be exactly one of the provided options
+- If you cannot find a value, use null
+- Return ONLY the JSON object, no explanation"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 256,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": mime_type,
+                                        "data": image_base64,
+                                    },
+                                },
+                                {"type": "text", "text": prompt},
+                            ],
+                        }
+                    ],
+                },
+            )
+        if res.status_code != 200:
+            return {}
+        data = res.json()
+        text = data["content"][0]["text"].strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        parsed = json.loads(text.strip())
+        return parsed
+    except Exception:
+        return {}
 
 
 @receipt_routes.get("/user")
@@ -153,7 +230,7 @@ async def list_receipts(current_user=Depends(get_current_user)):
     biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
-    result = supabase.table("receipts").select("*").eq("business_id", biz.data[0]["id"]).execute()
+    result = supabase.table("receipts").select("*").eq("business_id", biz.data[0]["id"]).order("uploaded_at", desc=True).execute()
     return [to_receipt(r) for r in result.data]
 
 
@@ -161,6 +238,43 @@ async def list_receipts(current_user=Depends(get_current_user)):
 async def get_receipt(receipt_id: str):
     supabase = get_supabase()
     result = supabase.table("receipts").select("*").eq("id", receipt_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    return to_receipt(result.data[0])
+
+
+class UpdateReceiptBody(BaseModel):
+    merchant: Optional[str] = None
+    amount: Optional[float] = None
+    receiptDate: Optional[str] = None
+    category: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@receipt_routes.patch("/receipts/{receipt_id}")
+async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=Depends(get_current_user)):
+    """Allow users to manually correct OCR-extracted fields."""
+    supabase = get_supabase()
+    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    if not biz.data:
+        raise HTTPException(status_code=400, detail="Business not found")
+    
+    update_data = {}
+    if body.merchant is not None:
+        update_data["merchant"] = body.merchant
+    if body.amount is not None:
+        update_data["amount"] = body.amount
+    if body.receiptDate is not None:
+        update_data["receipt_date"] = body.receiptDate
+    if body.category is not None:
+        update_data["category"] = body.category
+    if body.notes is not None:
+        update_data["notes"] = body.notes
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    result = supabase.table("receipts").update(update_data).eq("id", receipt_id).eq("business_id", biz.data[0]["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Receipt not found")
     return to_receipt(result.data[0])
@@ -187,6 +301,7 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
         ext = os.path.splitext(filename)[1].lower() or ".jpg"
         mime = "application/pdf" if ext == ".pdf" else f"image/{ext[1:]}"
         original_name = filename
+        ocr_base64 = image_base64
     elif "multipart/form-data" in content_type:
         form = await request.form()
         file_obj = form.get("file")
@@ -196,18 +311,34 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
         ext = os.path.splitext(file_obj.filename)[1].lower() or ".jpg"
         mime = file_obj.content_type or f"image/{ext[1:]}"
         original_name = file_obj.filename
+        ocr_base64 = b64lib.b64encode(content).decode("utf-8")
     else:
         raise HTTPException(status_code=400, detail="Unsupported content type")
 
+    # Upload to Supabase Storage
     unique = f"{int(time.time() * 1000)}-{random.randint(0, 999999999)}{ext}"
     supabase.storage.from_("receipts").upload(unique, content, {"content-type": mime})
     file_url = f"{supabase_url}/storage/v1/object/public/receipts/{unique}"
 
-    receipt = supabase.table("receipts").insert({
+    # Run OCR via Claude Vision (non-blocking — if it fails, receipt still saves)
+    ocr_data = await extract_receipt_data(ocr_base64, mime)
+
+    insert_payload = {
         "business_id": business_id,
         "file_path": file_url,
         "original_name": original_name,
-    }).execute()
+    }
+
+    if ocr_data.get("merchant"):
+        insert_payload["merchant"] = ocr_data["merchant"]
+    if ocr_data.get("amount") is not None:
+        insert_payload["amount"] = float(ocr_data["amount"])
+    if ocr_data.get("receipt_date"):
+        insert_payload["receipt_date"] = ocr_data["receipt_date"]
+    if ocr_data.get("category"):
+        insert_payload["category"] = ocr_data["category"]
+
+    receipt = supabase.table("receipts").insert(insert_payload).execute()
     if not receipt.data:
         raise HTTPException(status_code=500, detail="Failed to create receipt record")
     return JSONResponse(status_code=201, content=to_receipt(receipt.data[0]))
