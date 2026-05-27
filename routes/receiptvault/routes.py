@@ -80,12 +80,22 @@ def to_receipt(row: dict) -> dict:
 
 async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     """Use Claude Vision to extract merchant, amount, date, category from receipt image."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
+        logger.error("OCR SKIP: ANTHROPIC_API_KEY not set")
         return {}
 
-    # Claude Vision only supports images, not PDFs
     if "pdf" in mime_type:
+        logger.info("OCR SKIP: PDF file, skipping")
+        return {}
+
+    # Validate mime type for Claude Vision
+    allowed_mimes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
+    if mime_type not in allowed_mimes:
+        logger.error(f"OCR SKIP: unsupported mime type {mime_type}")
         return {}
 
     prompt = f"""You are a receipt parser. Extract the following from this receipt image and return ONLY valid JSON, nothing else:
@@ -104,6 +114,7 @@ Rules:
 - Return ONLY the JSON object, no explanation"""
 
     try:
+        logger.info(f"OCR START: mime={mime_type} base64_len={len(image_base64)}")
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -133,18 +144,22 @@ Rules:
                     ],
                 },
             )
+        logger.info(f"OCR RESPONSE: status={res.status_code}")
         if res.status_code != 200:
+            logger.error(f"OCR ERROR: status={res.status_code} body={res.text[:500]}")
             return {}
         data = res.json()
         text = data["content"][0]["text"].strip()
-        # Strip markdown code fences if present
+        logger.info(f"OCR RAW TEXT: {text[:200]}")
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
         parsed = json.loads(text.strip())
+        logger.info(f"OCR SUCCESS: {parsed}")
         return parsed
-    except Exception:
+    except Exception as e:
+        logger.error(f"OCR EXCEPTION: {type(e).__name__}: {str(e)}")
         return {}
 
 
