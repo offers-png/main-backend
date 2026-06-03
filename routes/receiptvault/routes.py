@@ -359,6 +359,7 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
 
 @receipt_routes.post("/send-now")
 async def send_now(current_user=Depends(get_current_user)):
+    import asyncio
     supabase = get_supabase()
     biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
     if not biz.data:
@@ -378,45 +379,45 @@ async def send_now(current_user=Depends(get_current_user)):
         return {"ok": True, "sent": 0}
 
     receipts = [to_receipt(r) for r in unsent.data]
+    sent_count = len(receipts)
 
-    # Generate cover sheet PDF
-    from pdf_generator import generate_cover_pdf
+    # Mark all as sent immediately so UI updates fast
     from datetime import datetime, timezone
-
-    period_label = datetime.now().strftime("%B %Y") + " Expenses"
-
-    pdf_bytes = await generate_cover_pdf(
-        business_name=business.get("business_name", ""),
-        owner_name=business.get("owner_name", ""),
-        accountant_email=business.get("accountant_email", ""),
-        receipts=receipts,
-        period_label=period_label,
-    )
-
-    pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
-    pdf_filename = f"ReceiptVault_{business['business_name'].replace(' ', '_')}_{datetime.now().strftime('%Y-%m')}.pdf"
-
-    # Send via Supabase Edge Function
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        edge_res = await client.post(
-            "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
-            json={
-                "businessId": business["id"],
-                "accountantEmail": business["accountant_email"],
-                "businessName": business["business_name"],
-                "receipts": receipts,
-                "pdfBase64": pdf_base64,
-                "pdfFilename": pdf_filename,
-            },
-        )
-
-    if not edge_res.is_success:
-        raise HTTPException(status_code=500, detail=f"Send failed: {edge_res.text}")
-
-    # Mark all receipts as sent
     sent_at = datetime.now(timezone.utc).isoformat()
     for r in unsent.data:
         supabase.table("receipts").update({"sent_at": sent_at}).eq("id", r["id"]).execute()
 
-    result = edge_res.json()
-    return {"ok": True, "sent": result.get("sent", len(unsent.data))}
+    # Fire PDF generation + email in background — don't wait for it
+    async def send_in_background():
+        try:
+            from pdf_generator import generate_cover_pdf
+            period_label = datetime.now().strftime("%B %Y") + " Expenses"
+            pdf_bytes = await generate_cover_pdf(
+                business_name=business.get("business_name", ""),
+                owner_name=business.get("owner_name", ""),
+                accountant_email=business.get("accountant_email", ""),
+                receipts=receipts,
+                period_label=period_label,
+            )
+            pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
+            pdf_filename = f"ReceiptVault_{business['business_name'].replace(' ', '_')}_{datetime.now().strftime('%Y-%m')}.pdf"
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                await client.post(
+                    "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
+                    json={
+                        "businessId": business["id"],
+                        "accountantEmail": business["accountant_email"],
+                        "businessName": business["business_name"],
+                        "receipts": receipts,
+                        "pdfBase64": pdf_base64,
+                        "pdfFilename": pdf_filename,
+                    },
+                )
+        except Exception as e:
+            print(f"Background send error: {e}")
+
+    asyncio.create_task(send_in_background())
+
+    # Return immediately — email sends in background
+    return {"ok": True, "sent": sent_count}
