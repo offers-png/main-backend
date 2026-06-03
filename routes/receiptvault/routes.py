@@ -80,22 +80,12 @@ def to_receipt(row: dict) -> dict:
 
 async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     """Use Claude Vision to extract merchant, amount, date, category from receipt image."""
-    import logging
-    logger = logging.getLogger(__name__)
-    
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        logger.error("OCR SKIP: ANTHROPIC_API_KEY not set")
         return {}
 
+    # Claude Vision only supports images, not PDFs
     if "pdf" in mime_type:
-        logger.info("OCR SKIP: PDF file, skipping")
-        return {}
-
-    # Validate mime type for Claude Vision
-    allowed_mimes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
-    if mime_type not in allowed_mimes:
-        logger.error(f"OCR SKIP: unsupported mime type {mime_type}")
         return {}
 
     prompt = f"""You are a receipt parser. Extract the following from this receipt image and return ONLY valid JSON, nothing else:
@@ -114,7 +104,6 @@ Rules:
 - Return ONLY the JSON object, no explanation"""
 
     try:
-        logger.info(f"OCR START: mime={mime_type} base64_len={len(image_base64)}")
         async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -144,22 +133,18 @@ Rules:
                     ],
                 },
             )
-        logger.info(f"OCR RESPONSE: status={res.status_code}")
         if res.status_code != 200:
-            logger.error(f"OCR ERROR: status={res.status_code} body={res.text[:500]}")
             return {}
         data = res.json()
         text = data["content"][0]["text"].strip()
-        logger.info(f"OCR RAW TEXT: {text[:200]}")
+        # Strip markdown code fences if present
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
         parsed = json.loads(text.strip())
-        logger.info(f"OCR SUCCESS: {parsed}")
         return parsed
-    except Exception as e:
-        logger.error(f"OCR EXCEPTION: {type(e).__name__}: {str(e)}")
+    except Exception:
         return {}
 
 
@@ -392,17 +377,46 @@ async def send_now(current_user=Depends(get_current_user)):
     if not unsent.data:
         return {"ok": True, "sent": 0}
 
-    async with httpx.AsyncClient() as client:
+    receipts = [to_receipt(r) for r in unsent.data]
+
+    # Generate cover sheet PDF
+    from pdf_generator import generate_cover_pdf
+    from datetime import datetime, timezone
+
+    period_label = datetime.now().strftime("%B %Y") + " Expenses"
+
+    pdf_bytes = await generate_cover_pdf(
+        business_name=business.get("business_name", ""),
+        owner_name=business.get("owner_name", ""),
+        accountant_email=business.get("accountant_email", ""),
+        receipts=receipts,
+        period_label=period_label,
+    )
+
+    pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
+    pdf_filename = f"ReceiptVault_{business['business_name'].replace(' ', '_')}_{datetime.now().strftime('%Y-%m')}.pdf"
+
+    # Send via Supabase Edge Function
+    async with httpx.AsyncClient(timeout=60.0) as client:
         edge_res = await client.post(
             "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
             json={
                 "businessId": business["id"],
                 "accountantEmail": business["accountant_email"],
                 "businessName": business["business_name"],
-                "receipts": [to_receipt(r) for r in unsent.data],
+                "receipts": receipts,
+                "pdfBase64": pdf_base64,
+                "pdfFilename": pdf_filename,
             },
         )
+
     if not edge_res.is_success:
         raise HTTPException(status_code=500, detail=f"Send failed: {edge_res.text}")
+
+    # Mark all receipts as sent
+    sent_at = datetime.now(timezone.utc).isoformat()
+    for r in unsent.data:
+        supabase.table("receipts").update({"sent_at": sent_at}).eq("id", r["id"]).execute()
+
     result = edge_res.json()
     return {"ok": True, "sent": result.get("sent", len(unsent.data))}
