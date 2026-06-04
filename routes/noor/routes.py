@@ -90,6 +90,9 @@ class TranscribeRequest(BaseModel):
     audio_b64: str          # base64 encoded audio (webm or mp4)
     surah: Optional[str] = None
 
+class SpeechToTextRequest(BaseModel):
+    audio_b64: str
+
 class StudentCreate(BaseModel):
     name: str
     age: Optional[int] = None
@@ -272,7 +275,7 @@ async def vision_check(req: VisionRequest):
 @noor_router.post("/transcribe")
 async def transcribe_recitation(req: TranscribeRequest):
     audio_bytes = base64.b64decode(req.audio_b64)
-    transcript = await ai_service.transcribe_audio(audio_bytes)
+    transcript = await ai_service.transcribe_audio(audio_bytes, language="ar")
 
     surah_context = f"The child is reciting {req.surah}. " if req.surah else ""
     score_prompt = (
@@ -288,6 +291,12 @@ async def transcribe_recitation(req: TranscribeRequest):
         "feedback": feedback,
         "surah": req.surah,
     }
+
+@noor_router.post("/speech-to-text")
+async def speech_to_text(req: SpeechToTextRequest):
+    audio_bytes = base64.b64decode(req.audio_b64)
+    transcript = (await ai_service.transcribe_audio(audio_bytes)).strip()
+    return {"transcript": transcript}
 
 @noor_router.post("/homework")
 async def grade_homework(student_id: str, image_b64: str, lesson_id: Optional[str] = None):

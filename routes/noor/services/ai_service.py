@@ -28,17 +28,21 @@ class AIService:
             return resp.json()["content"][0]["text"]
 
     @staticmethod
-    async def transcribe_audio(audio_bytes: bytes) -> str:
+    async def transcribe_audio(audio_bytes: bytes, language: str = None) -> str:
         if not settings.openai_api_key:
             raise HTTPException(400, "OPENAI_API_KEY not set — Whisper unavailable")
 
         import io
         async with httpx.AsyncClient(timeout=30) as client:
+            data = {"model": settings.whisper_model}
+            if language:
+                data["language"] = language
+
             resp = await client.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 files={"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")},
-                data={"model": settings.whisper_model, "language": "ar"}
+                data=data
             )
             if resp.status_code != 200:
                 raise HTTPException(500, f"Whisper error: {resp.text}")
