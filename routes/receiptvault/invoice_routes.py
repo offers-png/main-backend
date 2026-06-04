@@ -12,7 +12,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 
-invoice_routes = APIRouter()
+invoice_routes = APIRouter(prefix="/api", tags=["invoices"])
 
 
 def get_supabase():
