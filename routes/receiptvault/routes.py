@@ -15,7 +15,7 @@ receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
 _supabase_client = None
 
-CATEGORIES = ["Meals & Entertainment", "Travel", "Office Supplies", "Utilities", "Software & Subscriptions", "Advertising", "Vehicle & Fuel", "Equipment", "Other"]
+CATEGORIES = ["Inventory", "Meals & Entertainment", "Travel", "Office Supplies", "Utilities", "Software & Subscriptions", "Advertising", "Vehicle & Fuel", "Equipment", "Other"]
 
 def get_supabase() -> Client:
     global _supabase_client
@@ -88,20 +88,29 @@ async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     if "pdf" in mime_type:
         return {}
 
-    prompt = f"""You are a receipt parser. Extract the following from this receipt image and return ONLY valid JSON, nothing else:
+    prompt = f"""You are an expert receipt and invoice parser for a convenience store owner.
+
+Extract the following from this receipt/invoice image and return ONLY valid JSON:
 {{
-  "merchant": "store or restaurant name",
+  "merchant": "name of the company SELLING the goods (the vendor/supplier, NOT the buyer)",
   "amount": 12.99,
   "receipt_date": "YYYY-MM-DD",
   "category": "one of: {', '.join(CATEGORIES)}"
 }}
 
-Rules:
-- amount must be a number (total amount paid, no $ sign)
-- receipt_date must be YYYY-MM-DD format or null if not found
+CRITICAL RULES:
+- "merchant" = the SELLER/VENDOR/SUPPLIER name at the TOP of the invoice (e.g. PepsiCo, Heffron Distributing, Restaurant Depot, Walmart, Husted Dairy)
+- NEVER use the buyer/customer name (e.g. Shamrock Market, Fat Boys) as the merchant
+- On distributor invoices: "Send payment to" or the company logo at top = the merchant
+- amount = the final TOTAL DUE or TOTAL amount (a number, no $ sign)
+- receipt_date = YYYY-MM-DD format, or null
 - category must be exactly one of the provided options
+- For beverage distributors, food suppliers, dairy: use "Inventory"
+- For restaurant supply stores: use "Inventory"  
+- For office/store supplies (bags, cups, t-shirts): use "Office Supplies"
+- For gas/fuel: use "Vehicle & Fuel"
 - If you cannot find a value, use null
-- Return ONLY the JSON object, no explanation"""
+- Return ONLY the JSON object, no explanation, no markdown"""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
