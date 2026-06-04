@@ -402,26 +402,45 @@ async def resend_all(current_user=Depends(get_current_user)):
     async def send_in_background():
         try:
             from pdf_generator import generate_cover_pdf
+            from excel_generator import build_excel
             period_label = datetime.now().strftime("%B %Y") + " Expenses"
+            biz_name = business.get("business_name", "")
+            safe_name = biz_name.replace(" ", "_")
+            month_str = datetime.now().strftime("%Y-%m")
+
+            # Generate PDF cover sheet
             pdf_bytes = await generate_cover_pdf(
-                business_name=business.get("business_name", ""),
+                business_name=biz_name,
                 owner_name=business.get("owner_name", ""),
                 accountant_email=business.get("accountant_email", ""),
                 receipts=receipts,
                 period_label=period_label,
             )
             pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
-            pdf_filename = f"ReceiptVault_{business['business_name'].replace(' ', '_')}_{datetime.now().strftime('%Y-%m')}_RESEND.pdf"
+            pdf_filename = f"ReceiptVault_{safe_name}_{month_str}_RESEND.pdf"
+
+            # Generate Excel workbook
+            excel_bytes = build_excel(
+                business_name=biz_name,
+                period_label=period_label,
+                receipts=receipts,
+                gross_income=0.0,
+            )
+            excel_base64 = b64lib.b64encode(excel_bytes).decode("utf-8")
+            excel_filename = f"ReceiptVault_{safe_name}_{month_str}_RESEND.xlsx"
+
             async with httpx.AsyncClient(timeout=120.0) as client:
                 await client.post(
                     "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
                     json={
                         "businessId": business["id"],
                         "accountantEmail": business["accountant_email"],
-                        "businessName": business["business_name"],
+                        "businessName": biz_name,
                         "receipts": receipts,
                         "pdfBase64": pdf_base64,
                         "pdfFilename": pdf_filename,
+                        "excelBase64": excel_base64,
+                        "excelFilename": excel_filename,
                     },
                 )
         except Exception as e:
