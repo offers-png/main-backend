@@ -1,6 +1,10 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from scheduler import run_scheduled_sends
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.routes import receipt_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
@@ -15,7 +19,17 @@ from routes.genid.routes import genid_routes
 from routes.noor.routes import noor_router
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = AsyncIOScheduler()
+    # Run every hour — checks send_day/send_frequency for each business
+    scheduler.add_job(run_scheduled_sends, IntervalTrigger(hours=1), id="rv_scheduler", replace_existing=True)
+    scheduler.start()
+    print("[startup] ReceiptVault scheduler started — runs every hour")
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
