@@ -16,4 +16,3 @@ tldextract
 reportlab
 pillow
 openpyxl
-pydantic-settings
