@@ -21,6 +21,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://receipts.dealdily.com",
+        "https://receiptvaultdealdily.netlify.app",
         "https://dealdily.com",
         "http://localhost:5173",
         "http://localhost:3000",
