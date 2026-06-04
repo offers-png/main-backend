@@ -38,12 +38,24 @@ def should_send_today(business: dict) -> bool:
 
     today = datetime.now()
 
+    if freq == "weekly":
+        # send_day 0=Mon … 6=Sun (matches Python weekday())
+        return today.weekday() == (day % 7)
+
     if freq == "monthly":
         return today.day == day
 
-    if freq == "weekly":
-        # send_day 0=Mon … 6=Sun  (matches Python weekday())
-        return today.weekday() == (day % 7)
+    if freq == "quarterly":
+        # Send on send_day of Jan, Apr, Jul, Oct
+        return today.month in (1, 4, 7, 10) and today.day == day
+
+    if freq == "semi-annually":
+        # Send on send_day of Jan and Jul
+        return today.month in (1, 7) and today.day == day
+
+    if freq == "annually":
+        # Send on send_day of January each year
+        return today.month == 1 and today.day == day
 
     return False
 
