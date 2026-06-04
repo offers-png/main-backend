@@ -357,6 +357,71 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
     return {"message": "Receipt deleted"}
 
 
+
+@receipt_routes.post("/resend-all")
+async def resend_all(current_user=Depends(get_current_user)):
+    """Mark all receipts as unsent then send them again."""
+    supabase = get_supabase()
+    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    if not biz.data:
+        raise HTTPException(status_code=400, detail="Business not found")
+    business = biz.data[0]
+    if not business.get("accountant_email"):
+        raise HTTPException(status_code=400, detail="No accountant email configured")
+
+    # Mark ALL receipts as unsent
+    supabase.table("receipts").update({"sent_at": None}).eq("business_id", business["id"]).execute()
+
+    # Now call send_now logic
+    all_receipts = (
+        supabase.table("receipts")
+        .select("*")
+        .eq("business_id", business["id"])
+        .execute()
+    )
+    if not all_receipts.data:
+        return {"ok": True, "sent": 0}
+
+    receipts = [to_receipt(r) for r in all_receipts.data]
+    sent_count = len(receipts)
+
+    from datetime import datetime, timezone
+    sent_at = datetime.now(timezone.utc).isoformat()
+    for r in all_receipts.data:
+        supabase.table("receipts").update({"sent_at": sent_at}).eq("id", r["id"]).execute()
+
+    async def send_in_background():
+        try:
+            from pdf_generator import generate_cover_pdf
+            period_label = datetime.now().strftime("%B %Y") + " Expenses"
+            pdf_bytes = await generate_cover_pdf(
+                business_name=business.get("business_name", ""),
+                owner_name=business.get("owner_name", ""),
+                accountant_email=business.get("accountant_email", ""),
+                receipts=receipts,
+                period_label=period_label,
+            )
+            pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
+            pdf_filename = f"ReceiptVault_{business['business_name'].replace(' ', '_')}_{datetime.now().strftime('%Y-%m')}_RESEND.pdf"
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                await client.post(
+                    "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
+                    json={
+                        "businessId": business["id"],
+                        "accountantEmail": business["accountant_email"],
+                        "businessName": business["business_name"],
+                        "receipts": receipts,
+                        "pdfBase64": pdf_base64,
+                        "pdfFilename": pdf_filename,
+                    },
+                )
+        except Exception as e:
+            print(f"Background resend error: {e}")
+
+    import asyncio
+    asyncio.create_task(send_in_background())
+    return {"ok": True, "sent": sent_count}
+
 @receipt_routes.post("/send-now")
 async def send_now(current_user=Depends(get_current_user)):
     import asyncio
