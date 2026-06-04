@@ -58,6 +58,7 @@ def to_business(row: dict) -> dict:
         "sendFrequency": row.get("send_frequency"),
         "sendDay": row.get("send_day"),
         "sendEnabled": row.get("send_enabled", 1),
+        "ownerPhone": row.get("owner_phone"),
         "createdAt": str(row.get("created_at", "")),
     }
 
@@ -212,6 +213,7 @@ class AccountantConfigBody(BaseModel):
     sendFrequency: str
     sendDay: int
     sendEnabled: Optional[int] = 1
+    ownerPhone: Optional[str] = None
 
 
 @receipt_routes.post("/setup/accountant")
@@ -227,6 +229,8 @@ async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_
         "send_day": body.sendDay,
         "send_enabled": body.sendEnabled or 1,
     }
+    if body.ownerPhone:
+        data["owner_phone"] = body.ownerPhone
     result = supabase.table("businesses").update(data).eq("id", business_id).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to update accountant config")
@@ -331,6 +335,20 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
 
     # Run OCR via Claude Vision (non-blocking — if it fails, receipt still saves)
     ocr_data = await extract_receipt_data(ocr_base64, mime)
+
+    # ── Duplicate check ─────────────────────────────────────────────────
+    existing = (
+        supabase.table("receipts")
+        .select("id, original_name")
+        .eq("business_id", business_id)
+        .eq("original_name", original_name)
+        .execute()
+    )
+    if existing.data:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
+        )
 
     insert_payload = {
         "business_id": business_id,
@@ -525,6 +543,23 @@ async def send_now(current_user=Depends(get_current_user)):
                         "excelFilename": excel_filename,
                     },
                 )
+
+            # SMS notify owner
+            owner_phone = business.get("owner_phone", "")
+            telnyx_key = os.getenv("TELNYX_API_KEY", "")
+            if owner_phone and telnyx_key:
+                total = sum(float(r.get("amount") or 0) for r in receipts)
+                sms_body = (
+                    f"ReceiptVault: {len(receipts)} receipt(s) sent to "
+                    f"{business['accountant_email']}. "
+                    f"Total: ${total:.2f}"
+                )
+                async with httpx.AsyncClient(timeout=15.0) as sms_client:
+                    await sms_client.post(
+                        "https://api.telnyx.com/v2/messages",
+                        headers={"Authorization": f"Bearer {telnyx_key}"},
+                        json={"from": "+13156252025", "to": owner_phone, "text": sms_body},
+                    )
         except Exception as e:
             print(f"Background send error: {e}")
 
