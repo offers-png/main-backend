@@ -8,6 +8,9 @@ from scheduler import run_scheduled_sends
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.routes import receipt_routes
 from routes.receiptvault.invoice_routes import invoice_routes
+from routes.receiptvault.inventory_routes import inventory_routes
+from routes.receiptvault.mileage_routes import mileage_routes
+from routes.receiptvault.team_routes import team_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
@@ -52,6 +55,9 @@ app.add_middleware(
 app.include_router(clipper_routes, prefix="/api/clipper")
 app.include_router(receipt_routes)
 app.include_router(invoice_routes)
+app.include_router(inventory_routes)
+app.include_router(mileage_routes)
+app.include_router(team_routes)
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")
