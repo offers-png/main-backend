@@ -40,6 +40,7 @@ app.add_middleware(
     allow_origins=[
         "https://receipts.dealdily.com",
         "https://receiptvaultdealdily.netlify.app",
+        "https://sparkling-hotteok-81fc0b.netlify.app",
         "https://issa-uzair.netlify.app",
         "https://dealdily.com",
         "http://localhost:5173",
