@@ -73,36 +73,34 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to create invite")
 
-    # Send invite email via Resend
+    # Send invite email via Edge Function (has Resend key configured)
     biz_name = business.get("business_name", "Your employer")
     invite_link = f"https://receipts.dealdily.com/auth?invite={business['id']}&email={body.email}"
+    invite_html = f"""<div style="font-family:sans-serif;max-width:500px;margin:0 auto">
+      <div style="background:#1a6b3a;padding:24px 32px;border-radius:12px 12px 0 0">
+        <h1 style="color:white;margin:0;font-size:20px">ReceiptVault</h1>
+      </div>
+      <div style="background:#f2faf5;padding:24px 32px">
+        <p>You've been invited to join <b>{biz_name}</b> on ReceiptVault as a <b>{body.role}</b>.</p>
+        <p>Once you sign up, you can submit receipts for approval.</p>
+        <a href="{invite_link}" style="display:inline-block;background:#1a6b3a;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Accept Invitation</a>
+        <p style="color:#9c9c96;font-size:12px;margin-top:24px">ReceiptVault · receipts.dealdily.com</p>
+      </div>
+    </div>"""
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             await client.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                f"{SUPABASE_URL}/functions/v1/send-invoice",
+                headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
                 json={
-                    "from": f"ReceiptVault <invites@dealdily.com>",
-                    "to": [body.email],
+                    "to": body.email,
+                    "from": "ReceiptVault",
                     "subject": f"You've been invited to join {biz_name} on ReceiptVault",
-                    "html": f"""
-                    <div style="font-family:sans-serif;max-width:500px;margin:0 auto">
-                      <div style="background:#1a6b3a;padding:24px 32px;border-radius:12px 12px 0 0">
-                        <h1 style="color:white;margin:0;font-size:20px">ReceiptVault</h1>
-                      </div>
-                      <div style="background:#f2faf5;padding:24px 32px">
-                        <p>You've been invited to join <b>{biz_name}</b> on ReceiptVault as a <b>{body.role}</b>.</p>
-                        <p>Once you sign up, you can submit receipts for approval.</p>
-                        <a href="{invite_link}" style="display:inline-block;background:#1a6b3a;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Accept Invitation</a>
-                        <p style="color:#9c9c96;font-size:12px;margin-top:24px">ReceiptVault · receipts.dealdily.com</p>
-                      </div>
-                    </div>
-                    """,
+                    "html": invite_html,
                 }
             )
     except Exception as e:
         print(f"Invite email failed: {e}")
-
     return to_member(result.data[0])
 
 @team_routes.patch("/team/{member_id}")
