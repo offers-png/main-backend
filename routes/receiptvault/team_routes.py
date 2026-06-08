@@ -154,3 +154,46 @@ async def reject_receipt(receipt_id: str, current_user=Depends(get_current_user)
         "approved_by": current_user.user.id,
     }).eq("id", receipt_id).eq("business_id", business["id"]).execute()
     return {"ok": True}
+
+class AcceptInviteBody(BaseModel):
+    businessId: str
+    email: str
+
+
+@team_routes.post("/team/accept-invite")
+async def accept_invite(body: AcceptInviteBody, current_user=Depends(get_current_user)):
+    """Called after signup via invite link — links the new user to the business."""
+    supabase = get_supabase()
+    user_id = current_user.user.id
+    user_email = current_user.user.email
+
+    # Find the pending invite
+    invite = supabase.table("business_users")         .select("*")         .eq("business_id", body.businessId)         .eq("email", body.email)         .eq("status", "invited")         .execute()
+
+    if not invite.data:
+        # No pending invite found — still try to add them
+        pass
+    else:
+        # Update the invite to active with real user_id
+        supabase.table("business_users").update({
+            "user_id": user_id,
+            "status": "active",
+            "joined_at": datetime.utcnow().isoformat(),
+        }).eq("id", invite.data[0]["id"]).execute()
+        return {"ok": True, "joined": True}
+
+    # If no invite record, check if they should be added anyway
+    # (in case invite was already processed)
+    existing = supabase.table("business_users")         .select("id")         .eq("business_id", body.businessId)         .eq("user_id", user_id)         .execute()
+
+    if not existing.data:
+        supabase.table("business_users").insert({
+            "business_id": body.businessId,
+            "user_id": user_id,
+            "email": user_email or body.email,
+            "role": "employee",
+            "status": "active",
+            "joined_at": datetime.utcnow().isoformat(),
+        }).execute()
+
+    return {"ok": True, "joined": True}
