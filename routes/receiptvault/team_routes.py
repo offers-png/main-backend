@@ -128,7 +128,7 @@ async def remove_member(member_id: str, current_user=Depends(get_current_user)):
 
 # ── Receipt approval endpoints ────────────────────────────────────────────────
 
-@team_routes.get("/receipts/pending-approval")
+@team_routes.get("/team/pending-approvals")
 async def pending_approvals(current_user=Depends(get_current_user)):
     business = await get_business(current_user)
     supabase = get_supabase()
@@ -137,7 +137,7 @@ async def pending_approvals(current_user=Depends(get_current_user)):
         .eq("approval_status", "pending").execute()
     return rows.data or []
 
-@team_routes.post("/receipts/{receipt_id}/approve")
+@team_routes.post("/team/receipts/{receipt_id}/approve")
 async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     business = await get_business(current_user)
     supabase = get_supabase()
@@ -147,7 +147,7 @@ async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user
     }).eq("id", receipt_id).eq("business_id", business["id"]).execute()
     return {"ok": True}
 
-@team_routes.post("/receipts/{receipt_id}/reject")
+@team_routes.post("/team/receipts/{receipt_id}/reject")
 async def reject_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     business = await get_business(current_user)
     supabase = get_supabase()
