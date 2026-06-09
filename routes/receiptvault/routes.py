@@ -234,7 +234,8 @@ class AccountantConfigBody(BaseModel):
 @receipt_routes.post("/setup/accountant")
 async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business profile must be created first")
     business_id = biz.data[0]["id"]
@@ -255,7 +256,8 @@ async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_
 @receipt_routes.get("/receipts")
 async def list_receipts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     result = supabase.table("receipts").select("*").eq("business_id", biz.data[0]["id"]).order("uploaded_at", desc=True).execute()
@@ -283,7 +285,8 @@ class UpdateReceiptBody(BaseModel):
 async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=Depends(get_current_user)):
     """Allow users to manually correct OCR-extracted fields."""
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     
@@ -311,7 +314,8 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
 @receipt_routes.post("/receipts", status_code=201)
 async def upload_receipt(request: Request, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     business_id = biz.data[0]["id"]
@@ -365,10 +369,16 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
             detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
         )
 
+    # Check if uploader is owner or team member
+    is_owner = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    approval_status = "approved" if is_owner.data else "pending"
+
     insert_payload = {
         "business_id": business_id,
         "file_path": file_url,
         "original_name": original_name,
+        "submitted_by": current_user.user.id,
+        "approval_status": approval_status,
     }
 
     if ocr_data.get("merchant"):
@@ -389,7 +399,8 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
 @receipt_routes.delete("/receipts/{receipt_id}")
 async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     business_id = biz.data[0]["id"]
@@ -404,7 +415,8 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
 async def resend_all(current_user=Depends(get_current_user)):
     """Mark all receipts as unsent then send them again."""
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [biz_data] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     business = biz.data[0]
@@ -487,7 +499,8 @@ async def resend_all(current_user=Depends(get_current_user)):
 async def send_now(current_user=Depends(get_current_user)):
     import asyncio
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    biz_data = get_business_for_user(supabase, current_user.user.id)
+    biz = type("R", (), {"data": [biz_data] if biz_data else []})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business not found")
     business = biz.data[0]
