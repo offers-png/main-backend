@@ -16,6 +16,20 @@ team_routes = APIRouter(prefix="/api", tags=["team"])
 def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
+def get_business_for_user(supabase, user_id: str):
+    """Get business for owner OR team member."""
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if result.data:
+        return result.data[0]
+    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if biz.data:
+            return biz.data[0]
+    return None
+
+
 def to_member(row):
     return {
         "id": row.get("id"),
@@ -38,7 +52,7 @@ class UpdateMemberBody(BaseModel):
 
 async def get_business(current_user):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([_b] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Business not found")
     return biz.data[0]
