@@ -19,6 +19,20 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def get_business_for_user(supabase, user_id: str):
+    """Get business for owner OR team member."""
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if result.data:
+        return result.data[0]
+    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if biz.data:
+            return biz.data[0]
+    return None
+
+
+
 async def get_current_user(authorization: str = None):
     from fastapi import Header
     return authorization
@@ -274,7 +288,7 @@ from routes.receiptvault.routes import get_current_user
 @invoice_routes.get("/invoices")
 async def list_invoices(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         return []
     business_id = biz.data[0]["id"]
@@ -286,7 +300,7 @@ async def list_invoices(current_user=Depends(get_current_user)):
 @invoice_routes.get("/invoices/{invoice_id}")
 async def get_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Business not found")
     business_id = biz.data[0]["id"]
@@ -302,7 +316,7 @@ async def get_invoice(invoice_id: str, current_user=Depends(get_current_user)):
 @invoice_routes.post("/invoices")
 async def create_invoice(body: CreateInvoiceBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([_b] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business profile required")
     business_id = biz.data[0]["id"]
@@ -355,7 +369,7 @@ async def create_invoice(body: CreateInvoiceBody, current_user=Depends(get_curre
 @invoice_routes.patch("/invoices/{invoice_id}")
 async def update_invoice(invoice_id: str, body: UpdateInvoiceBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Not found")
     business_id = biz.data[0]["id"]
@@ -402,7 +416,7 @@ async def update_invoice(invoice_id: str, body: UpdateInvoiceBody, current_user=
 @invoice_routes.delete("/invoices/{invoice_id}")
 async def delete_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Not found")
     business_id = biz.data[0]["id"]
@@ -414,7 +428,7 @@ async def delete_invoice(invoice_id: str, current_user=Depends(get_current_user)
 @invoice_routes.post("/invoices/{invoice_id}/send")
 async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
+    biz = type("BizR", (), {"data": ([_b] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Not found")
     business = biz.data[0]
