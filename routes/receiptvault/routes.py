@@ -213,7 +213,7 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         "owner_name": body.ownerName,
         "owner_address": body.ownerAddress,
     }
-    existing = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    existing = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if existing.data:
         result = supabase.table("businesses").update(data).eq("id", existing.data[0]["id"]).execute()
     else:
@@ -370,7 +370,7 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
         )
 
     # Check if uploader is owner or team member
-    is_owner = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    is_owner = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     approval_status = "approved" if is_owner.data else "pending"
 
     insert_payload = {
