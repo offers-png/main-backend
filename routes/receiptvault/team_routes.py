@@ -182,13 +182,11 @@ async def accept_invite(body: AcceptInviteBody, current_user=Depends(get_current
     user_email = current_user.user.email
 
     # Find the pending invite
-    invite = supabase.table("business_users")         .select("*")         .eq("business_id", body.businessId)         .eq("email", body.email)         .eq("status", "invited")         .execute()
+    # Look for pending invite by email (user_id is placeholder until accepted)
+    invite = supabase.table("business_users")         .select("*")         .eq("business_id", body.businessId)         .eq("email", body.email)         .execute()
 
-    if not invite.data:
-        # No pending invite found — still try to add them
-        pass
-    else:
-        # Update the invite to active with real user_id
+    if invite.data:
+        # Update to active with real user_id
         supabase.table("business_users").update({
             "user_id": user_id,
             "status": "active",
@@ -196,18 +194,14 @@ async def accept_invite(body: AcceptInviteBody, current_user=Depends(get_current
         }).eq("id", invite.data[0]["id"]).execute()
         return {"ok": True, "joined": True}
 
-    # If no invite record, check if they should be added anyway
-    # (in case invite was already processed)
-    existing = supabase.table("business_users")         .select("id")         .eq("business_id", body.businessId)         .eq("user_id", user_id)         .execute()
-
-    if not existing.data:
-        supabase.table("business_users").insert({
-            "business_id": body.businessId,
-            "user_id": user_id,
-            "email": user_email or body.email,
-            "role": "employee",
-            "status": "active",
-            "joined_at": datetime.utcnow().isoformat(),
-        }).execute()
+    # No invite record — add them directly
+    supabase.table("business_users").insert({
+        "business_id": body.businessId,
+        "user_id": user_id,
+        "email": user_email or body.email,
+        "role": "employee",
+        "status": "active",
+        "joined_at": datetime.utcnow().isoformat(),
+    }).execute()
 
     return {"ok": True, "joined": True}
