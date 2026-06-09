@@ -171,14 +171,29 @@ async def get_user(current_user=Depends(get_current_user)):
 @receipt_routes.get("/business")
 async def get_business(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    result = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
-    if not result.data:
-        return {"setupRequired": "business"}
-    business = result.data[0]
-    out = to_business(business)
-    if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
-        out["setupRequired"] = "accountant"
-    return out
+    user_id = current_user.user.id
+
+    # First check if user owns a business
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if result.data:
+        business = result.data[0]
+        out = to_business(business)
+        if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
+            out["setupRequired"] = "accountant"
+        return out
+
+    # Check if user is a team member of another business
+    member = supabase.table("business_users").select("*").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        business_id = member.data[0]["business_id"]
+        biz = supabase.table("businesses").select("*").eq("id", business_id).execute()
+        if biz.data:
+            out = to_business(biz.data[0])
+            out["role"] = member.data[0].get("role", "employee")
+            out["isTeamMember"] = True
+            return out
+
+    return {"setupRequired": "business"}
 
 
 class BusinessProfileBody(BaseModel):
