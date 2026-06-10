@@ -182,7 +182,7 @@ async def get_business(current_user=Depends(get_current_user)):
             out["setupRequired"] = "accountant"
         return out
 
-    # Check if user is a team member of another business
+    # Check if user is an active team member
     member = supabase.table("business_users").select("*").eq("user_id", user_id).eq("status", "active").execute()
     if member.data:
         business_id = member.data[0]["business_id"]
@@ -192,6 +192,26 @@ async def get_business(current_user=Depends(get_current_user)):
             out["role"] = member.data[0].get("role", "employee")
             out["isTeamMember"] = True
             return out
+
+    # Auto-link: check if there is a pending invite for this user's email
+    user_email = current_user.user.email
+    if user_email:
+        pending = supabase.table("business_users").select("*").eq("email", user_email).execute()
+        if pending.data:
+            invite = pending.data[0]
+            # Update placeholder user_id to real UUID and activate
+            supabase.table("business_users").update({
+                "user_id": user_id,
+                "status": "active",
+                "joined_at": datetime.utcnow().isoformat(),
+            }).eq("id", invite["id"]).execute()
+            # Now return their business
+            biz = supabase.table("businesses").select("*").eq("id", invite["business_id"]).execute()
+            if biz.data:
+                out = to_business(biz.data[0])
+                out["role"] = invite.get("role", "employee")
+                out["isTeamMember"] = True
+                return out
 
     return {"setupRequired": "business"}
 
