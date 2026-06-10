@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user, get_business_for_user
+from routes.receiptvault.routes import get_current_user, get_business_for_user, to_receipt
 import httpx
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
@@ -166,7 +166,7 @@ async def pending_approvals(current_user=Depends(get_current_user)):
     rows = supabase.table("receipts").select("*")\
         .eq("business_id", business["id"])\
         .eq("approval_status", "pending").execute()
-    return rows.data or []
+    return [to_receipt(r) for r in (rows.data or [])]
 
 @team_routes.post("/team/receipts/{receipt_id}/approve")
 async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user)):
@@ -191,6 +191,17 @@ async def reject_receipt(receipt_id: str, current_user=Depends(get_current_user)
         "approved_by": current_user.user.id,
     }).eq("id", receipt_id).eq("business_id", business["id"]).execute()
     return {"ok": True}
+
+# ── Aliases matching frontend paths (/api/receipts/{id}/approve|reject) ──────
+
+@team_routes.post("/receipts/{receipt_id}/approve")
+async def approve_receipt_alias(receipt_id: str, current_user=Depends(get_current_user)):
+    return await approve_receipt(receipt_id, current_user)
+
+@team_routes.post("/receipts/{receipt_id}/reject")
+async def reject_receipt_alias(receipt_id: str, current_user=Depends(get_current_user)):
+    return await reject_receipt(receipt_id, current_user)
+
 
 class AcceptInviteBody(BaseModel):
     businessId: str
