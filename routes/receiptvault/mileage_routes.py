@@ -44,6 +44,29 @@ def resolve_access(supabase, user_id: str):
     raise HTTPException(status_code=404, detail="Business not found")
 
 
+def get_role(supabase, user_id: str):
+    """Returns role string or None."""
+    if get_owner_business(supabase, user_id):
+        return "owner"
+    member = supabase.table("business_users").select("role").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        return member.data[0].get("role") or "employee"
+    return None
+
+
+def get_approver_business(supabase, user_id: str):
+    """Returns business if user can approve (owner or manager), else None."""
+    biz = get_owner_business(supabase, user_id)
+    if biz:
+        return biz
+    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data and member.data[0].get("role") == "manager":
+        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if b.data:
+            return b.data[0]
+    return None
+
+
 def to_entry(row):
     miles = float(row.get("miles") or 0)
     return {
@@ -79,9 +102,11 @@ async def list_mileage(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business, is_owner = resolve_access(supabase, current_user.user.id)
 
+    role = "owner" if is_owner else (get_role(supabase, current_user.user.id) or "employee")
+    can_approve = role in ("owner", "manager")
     query = supabase.table("rv_mileage_entries").select("*").eq("business_id", business["id"])
-    if not is_owner:
-        # Employees only see their own entries
+    if not can_approve:
+        # Employees/bookkeepers only see their own entries
         query = query.eq("user_id", current_user.user.id)
     rows = query.order("date", desc=True).execute()
 
@@ -97,7 +122,7 @@ async def list_mileage(current_user=Depends(get_current_user)):
         "totalDeduction": round(total_deduction, 2),
         "pendingCount": pending_count,
         "irsRate": IRS_RATE,
-        "isOwner": is_owner,
+        "isOwner": can_approve,
     }
 
 @mileage_routes.post("/mileage")
@@ -112,7 +137,7 @@ async def create_mileage(body: CreateMileageBody, current_user=Depends(get_curre
         "end_location": body.endLocation,
         "miles": body.miles,
         "purpose": body.purpose,
-        "approval_status": "approved" if is_owner else "pending",
+        "approval_status": "approved" if (is_owner or get_role(supabase, current_user.user.id) in ("manager", "bookkeeper")) else "pending",
     }
     result = supabase.table("rv_mileage_entries").insert(data).execute()
     if not result.data:
@@ -154,9 +179,9 @@ async def delete_mileage(entry_id: str, current_user=Depends(get_current_user)):
 @mileage_routes.post("/mileage/{entry_id}/approve")
 async def approve_mileage(entry_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business = get_owner_business(supabase, current_user.user.id)
+    business = get_approver_business(supabase, current_user.user.id)
     if not business:
-        raise HTTPException(status_code=403, detail="Only the owner can approve mileage")
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can approve mileage")
     result = supabase.table("rv_mileage_entries").update({"approval_status": "approved"})\
         .eq("id", entry_id).eq("business_id", business["id"]).execute()
     if not result.data:
@@ -166,9 +191,9 @@ async def approve_mileage(entry_id: str, current_user=Depends(get_current_user))
 @mileage_routes.post("/mileage/{entry_id}/reject")
 async def reject_mileage(entry_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business = get_owner_business(supabase, current_user.user.id)
+    business = get_approver_business(supabase, current_user.user.id)
     if not business:
-        raise HTTPException(status_code=403, detail="Only the owner can reject mileage")
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can reject mileage")
     result = supabase.table("rv_mileage_entries").update({"approval_status": "rejected"})\
         .eq("id", entry_id).eq("business_id", business["id"]).execute()
     if not result.data:

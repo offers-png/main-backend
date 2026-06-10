@@ -46,6 +46,26 @@ def get_business_for_user(supabase, user_id: str):
     return None
 
 
+def resolve_role(supabase, user_id: str):
+    """Returns (business, role). role is 'owner' | 'manager' | 'bookkeeper' | 'employee'.
+    Returns (None, None) if user has no business."""
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if result.data:
+        return result.data[0], "owner"
+    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if biz.data:
+            return biz.data[0], member.data[0].get("role") or "employee"
+    return None, None
+
+
+# Roles allowed to auto-approve their own submissions
+AUTO_APPROVE_ROLES = {"owner", "manager", "bookkeeper"}
+# Roles allowed to approve/reject others' submissions
+APPROVER_ROLES = {"owner", "manager"}
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
@@ -404,9 +424,9 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
             detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
         )
 
-    # Owner uploads auto-approve; employee uploads need approval
-    owner_check = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).eq("id", business_id).execute()
-    approval_status = "approved" if owner_check.data else "pending"
+    # Owner/manager/bookkeeper uploads auto-approve; employee uploads need approval
+    _, uploader_role = resolve_role(supabase, current_user.user.id)
+    approval_status = "approved" if uploader_role in AUTO_APPROVE_ROLES else "pending"
 
     insert_payload = {
         "business_id": business_id,
@@ -450,6 +470,9 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
 async def resend_all(current_user=Depends(get_current_user)):
     """Mark all receipts as unsent then send them again."""
     supabase = get_supabase()
+    _, _role = resolve_role(supabase, current_user.user.id)
+    if _role not in ("owner", "bookkeeper"):
+        raise HTTPException(status_code=403, detail="Only the owner or bookkeeper can send to the accountant")
     biz_data = get_business_for_user(supabase, current_user.user.id)
     biz = type("R", (), {"data": [biz_data] if biz_data else []})()
     if not biz.data:
@@ -534,6 +557,9 @@ async def resend_all(current_user=Depends(get_current_user)):
 async def send_now(current_user=Depends(get_current_user)):
     import asyncio
     supabase = get_supabase()
+    _, _role = resolve_role(supabase, current_user.user.id)
+    if _role not in ("owner", "bookkeeper"):
+        raise HTTPException(status_code=403, detail="Only the owner or bookkeeper can send to the accountant")
     biz_data = get_business_for_user(supabase, current_user.user.id)
     biz = type("R", (), {"data": [biz_data] if biz_data else []})()
     if not biz.data:

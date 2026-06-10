@@ -17,6 +17,25 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+def get_owner_business_only(supabase, user_id: str):
+    """Returns business only if user is the OWNER."""
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    return result.data[0] if result.data else None
+
+
+def get_approver_business(supabase, user_id: str):
+    """Owner or manager — can view team and approve receipts."""
+    biz = get_owner_business_only(supabase, user_id)
+    if biz:
+        return biz
+    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data and member.data[0].get("role") == "manager":
+        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if b.data:
+            return b.data[0]
+    return None
+
+
 
 
 def to_member(row):
@@ -48,7 +67,10 @@ async def get_business(current_user):
 
 @team_routes.get("/team")
 async def list_team(current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    supabase_check = get_supabase()
+    business = get_approver_business(supabase_check, current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can view the team")
     supabase = get_supabase()
     rows = supabase.table("business_users").select("*")\
         .eq("business_id", business["id"]).order("created_at").execute()
@@ -56,7 +78,9 @@ async def list_team(current_user=Depends(get_current_user)):
 
 @team_routes.post("/team/invite")
 async def invite_member(body: InviteMemberBody, current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_owner_business_only(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner can invite team members")
     supabase = get_supabase()
 
     # Check if already invited
@@ -108,7 +132,9 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
 
 @team_routes.patch("/team/{member_id}")
 async def update_member(member_id: str, body: UpdateMemberBody, current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_owner_business_only(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner can update team members")
     supabase = get_supabase()
     update_data = {}
     if body.role is not None: update_data["role"] = body.role
@@ -121,7 +147,9 @@ async def update_member(member_id: str, body: UpdateMemberBody, current_user=Dep
 
 @team_routes.delete("/team/{member_id}")
 async def remove_member(member_id: str, current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_owner_business_only(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner can remove team members")
     supabase = get_supabase()
     supabase.table("business_users").delete()\
         .eq("id", member_id).eq("business_id", business["id"]).execute()
@@ -131,7 +159,9 @@ async def remove_member(member_id: str, current_user=Depends(get_current_user)):
 
 @team_routes.get("/team/pending-approvals")
 async def pending_approvals(current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_approver_business(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can view approvals")
     supabase = get_supabase()
     rows = supabase.table("receipts").select("*")\
         .eq("business_id", business["id"])\
@@ -140,7 +170,9 @@ async def pending_approvals(current_user=Depends(get_current_user)):
 
 @team_routes.post("/team/receipts/{receipt_id}/approve")
 async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_approver_business(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can approve receipts")
     supabase = get_supabase()
     supabase.table("receipts").update({
         "approval_status": "approved",
@@ -150,7 +182,9 @@ async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user
 
 @team_routes.post("/team/receipts/{receipt_id}/reject")
 async def reject_receipt(receipt_id: str, current_user=Depends(get_current_user)):
-    business = await get_business(current_user)
+    business = get_approver_business(get_supabase(), current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can reject receipts")
     supabase = get_supabase()
     supabase.table("receipts").update({
         "approval_status": "rejected",
