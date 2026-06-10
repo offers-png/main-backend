@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user
+from routes.receiptvault.routes import get_current_user, get_business_for_user
 import httpx
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
@@ -17,17 +17,6 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_business_for_user(supabase, user_id: str):
-    """Get business for owner OR team member."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        return result.data[0]
-    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
 
 
 def to_member(row):

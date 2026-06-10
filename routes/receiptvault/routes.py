@@ -8,6 +8,7 @@ import base64 as b64lib
 import time
 import random
 import json
+from datetime import datetime
 
 from supabase import create_client, Client
 
@@ -30,6 +31,19 @@ def get_supabase() -> Client:
             raise HTTPException(status_code=500, detail="Supabase key not configured")
         _supabase_client = create_client(supabase_url, supabase_key)
     return _supabase_client
+
+
+def get_business_for_user(supabase, user_id: str):
+    """Get business for owner OR active team member."""
+    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if result.data:
+        return result.data[0]
+    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if biz.data:
+            return biz.data[0]
+    return None
 
 
 async def get_current_user(authorization: Optional[str] = Header(None)):
