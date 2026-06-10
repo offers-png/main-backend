@@ -137,7 +137,7 @@ CRITICAL RULES:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-haiku-4-5-20251001",
+                    "model": "claude-sonnet-4-6",
                     "max_tokens": 256,
                     "messages": [
                         {
@@ -168,7 +168,8 @@ CRITICAL RULES:
                 text = text[4:]
         parsed = json.loads(text.strip())
         return parsed
-    except Exception:
+    except Exception as ocr_err:
+        print(f"OCR error: {ocr_err}")
         return {}
 
 
