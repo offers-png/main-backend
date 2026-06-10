@@ -404,9 +404,9 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
             detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
         )
 
-    # Check if uploader is owner or team member
-    is_owner = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
-    approval_status = "approved" if is_owner.data else "pending"
+    # Owner uploads auto-approve; employee uploads need approval
+    owner_check = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).eq("id", business_id).execute()
+    approval_status = "approved" if owner_check.data else "pending"
 
     insert_payload = {
         "business_id": business_id,

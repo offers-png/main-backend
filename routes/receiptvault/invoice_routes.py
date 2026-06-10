@@ -20,15 +20,10 @@ def get_supabase():
 
 
 def get_business_for_user(supabase, user_id: str):
-    """Get business for owner OR team member."""
+    """OWNER ONLY — employees cannot access this module."""
     result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
     if result.data:
         return result.data[0]
-    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
     return None
 
 
