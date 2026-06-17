@@ -108,7 +108,7 @@ async def billing_portal(current_user=Depends(get_current_user)):
 @billing_routes.get("/billing/status")
 async def billing_status(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("plan,member_limit,trial_ends_at,stripe_customer_id,stripe_subscription_id").eq("user_id", current_user.user.id).execute()
+    biz = supabase.table("businesses").select("plan,member_limit,trial_ends_at,stripe_customer_id,stripe_subscription_id,subscription_status").eq("user_id", current_user.user.id).execute()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Business not found")
     b = biz.data[0]
@@ -123,6 +123,8 @@ async def billing_status(current_user=Depends(get_current_user)):
         "in_trial": in_trial,
         "is_active": is_active,
         "has_subscription": bool(b.get("stripe_subscription_id")),
+        "subscription_status": b.get("subscription_status"),
+        "payment_past_due": b.get("subscription_status") == "past_due",
     }
 
 @billing_routes.post("/billing/webhook")
@@ -171,11 +173,33 @@ async def stripe_webhook(request: Request):
         sub = event["data"]["object"]
         customer_id = sub.get("customer")
         new_price_id = sub.get("items", {}).get("data", [{}])[0].get("price", {}).get("id")
+        sub_status = sub.get("status")  # active, past_due, canceled, unpaid, etc.
         if customer_id and new_price_id in PLANS:
             plan_info = PLANS[new_price_id]
-            supabase.table("businesses").update({
+            update_data = {
                 "plan": plan_info["plan"],
                 "member_limit": plan_info["member_limit"],
+                "subscription_status": sub_status,
+            }
+            supabase.table("businesses").update(update_data).eq("stripe_customer_id", customer_id).execute()
+
+    elif event["type"] == "invoice.payment_failed":
+        invoice = event["data"]["object"]
+        customer_id = invoice.get("customer")
+        if customer_id:
+            # Don't revoke access immediately — Stripe will retry per its settings.
+            # Just flag the account so the UI can show a payment-issue warning.
+            supabase.table("businesses").update({
+                "subscription_status": "past_due",
+            }).eq("stripe_customer_id", customer_id).execute()
+
+    elif event["type"] == "invoice.payment_succeeded":
+        invoice = event["data"]["object"]
+        customer_id = invoice.get("customer")
+        if customer_id:
+            # Clear any past_due flag once payment goes through
+            supabase.table("businesses").update({
+                "subscription_status": "active",
             }).eq("stripe_customer_id", customer_id).execute()
 
     return {"ok": True}
