@@ -290,20 +290,43 @@ class BusinessProfileBody(BaseModel):
 @receipt_routes.post("/setup/business")
 async def setup_business(body: BusinessProfileBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    data = {
-        "user_id": current_user.user.id,
-        "business_name": body.businessName,
-        "business_address": body.businessAddress,
-        "owner_name": body.ownerName,
-        "owner_address": body.ownerAddress,
-    }
-    if body.taxId is not None:
-        data["tax_id"] = body.taxId
-    existing = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
-    if existing.data:
-        result = supabase.table("businesses").update(data).eq("id", existing.data[0]["id"]).execute()
+    user_id = current_user.user.id
+
+    # Does this user already own a business?
+    owned = supabase.table("businesses").select("id").eq("user_id", user_id).execute()
+
+    if owned.data:
+        # Owner editing their own existing business. NEVER include user_id in
+        # this update — it previously did, which meant any call here silently
+        # reassigned ownership of the business to whoever called it.
+        data = {
+            "business_name": body.businessName,
+            "business_address": body.businessAddress,
+            "owner_name": body.ownerName,
+            "owner_address": body.ownerAddress,
+        }
+        if body.taxId is not None:
+            data["tax_id"] = body.taxId
+        result = supabase.table("businesses").update(data).eq("id", owned.data[0]["id"]).execute()
     else:
+        # Not an owner. If they're already a team member somewhere, they don't
+        # get to create/edit a business profile — only the owner can.
+        member = supabase.table("business_users").select("id").eq("user_id", user_id).eq("status", "active").execute()
+        if member.data:
+            raise HTTPException(status_code=403, detail="Only the business owner can edit the business profile.")
+        # Brand new user with no business and no team membership — normal
+        # first-time signup flow. They become the owner of a new business.
+        data = {
+            "user_id": user_id,
+            "business_name": body.businessName,
+            "business_address": body.businessAddress,
+            "owner_name": body.ownerName,
+            "owner_address": body.ownerAddress,
+        }
+        if body.taxId is not None:
+            data["tax_id"] = body.taxId
         result = supabase.table("businesses").insert(data).execute()
+
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to save business")
     return to_business(result.data[0])
@@ -320,8 +343,10 @@ class AccountantConfigBody(BaseModel):
 @receipt_routes.post("/setup/accountant")
 async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz_data = get_business_for_user(supabase, current_user.user.id)
-    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
+    owned = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    if not owned.data:
+        raise HTTPException(status_code=403, detail="Only the business owner can edit accountant settings.")
+    biz = type("R", (), {"data": [{"id": owned.data[0]["id"]}]})()
     if not biz.data:
         raise HTTPException(status_code=400, detail="Business profile must be created first")
     business_id = biz.data[0]["id"]
