@@ -93,6 +93,7 @@ def to_business(row: dict) -> dict:
         "sendDay": row.get("send_day"),
         "sendEnabled": row.get("send_enabled", 1),
         "ownerPhone": row.get("owner_phone"),
+        "taxId": row.get("tax_id"),
         "createdAt": str(row.get("created_at", "")),
     }
 
@@ -256,6 +257,7 @@ class BusinessProfileBody(BaseModel):
     businessAddress: str
     ownerName: str
     ownerAddress: Optional[str] = None
+    taxId: Optional[str] = None
 
 
 @receipt_routes.post("/setup/business")
@@ -268,6 +270,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         "owner_name": body.ownerName,
         "owner_address": body.ownerAddress,
     }
+    if body.taxId is not None:
+        data["tax_id"] = body.taxId
     existing = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if existing.data:
         result = supabase.table("businesses").update(data).eq("id", existing.data[0]["id"]).execute()
