@@ -12,6 +12,7 @@ from routes.receiptvault.inventory_routes import inventory_routes
 from routes.receiptvault.mileage_routes import mileage_routes
 from routes.receiptvault.team_routes import team_routes
 from routes.receiptvault.billing_routes import billing_routes
+from routes.receiptvault.money_routes import money_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
@@ -61,6 +62,7 @@ app.include_router(inventory_routes)
 app.include_router(mileage_routes)
 app.include_router(team_routes)
 app.include_router(billing_routes)
+app.include_router(money_routes)
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")
