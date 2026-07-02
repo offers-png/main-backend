@@ -60,6 +60,29 @@ def resolve_role(supabase, user_id: str):
     return None, None
 
 
+ALL_MODULES = ["receipts", "money_box", "mileage", "invoices", "inventory"]
+
+
+def resolve_module_access(supabase, user_id: str, module: str):
+    """Returns the business dict if this user can access `module`.
+    The owner always has every module. Team members only have what the
+    owner explicitly checked off for them on the Team page.
+    Raises 403 if they're on the team but don't have this module, 404 if
+    they have no business relationship at all."""
+    biz = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
+    if biz.data:
+        return biz.data[0]  # owner: full access, always
+    member = supabase.table("business_users").select("business_id, modules").eq("user_id", user_id).eq("status", "active").execute()
+    if member.data:
+        modules = member.data[0].get("modules") or []
+        if module not in modules:
+            raise HTTPException(status_code=403, detail=f"You don't have access to this. Ask the owner to add it on the Team page.")
+        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
+        if b.data:
+            return b.data[0]
+    raise HTTPException(status_code=404, detail="Business not found")
+
+
 # Roles allowed to auto-approve their own submissions
 AUTO_APPROVE_ROLES = {"owner", "manager", "bookkeeper"}
 # Roles allowed to approve/reject others' submissions
@@ -214,6 +237,8 @@ async def get_business(current_user=Depends(get_current_user)):
     if result.data:
         business = result.data[0]
         out = to_business(business)
+        out["role"] = "owner"
+        out["modules"] = ALL_MODULES
         if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
             out["setupRequired"] = "accountant"
         return out
@@ -226,6 +251,7 @@ async def get_business(current_user=Depends(get_current_user)):
         if biz.data:
             out = to_business(biz.data[0])
             out["role"] = member.data[0].get("role", "employee")
+            out["modules"] = member.data[0].get("modules") or []
             out["isTeamMember"] = True
             return out
 
@@ -246,6 +272,7 @@ async def get_business(current_user=Depends(get_current_user)):
             if biz.data:
                 out = to_business(biz.data[0])
                 out["role"] = invite.get("role", "employee")
+                out["modules"] = invite.get("modules") or []
                 out["isTeamMember"] = True
                 return out
 
@@ -315,11 +342,8 @@ async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_
 @receipt_routes.get("/receipts")
 async def list_receipts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz_data = get_business_for_user(supabase, current_user.user.id)
-    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
-    if not biz.data:
-        raise HTTPException(status_code=400, detail="Business not found")
-    result = supabase.table("receipts").select("*").eq("business_id", biz.data[0]["id"]).order("uploaded_at", desc=True).execute()
+    business = resolve_module_access(supabase, current_user.user.id, "receipts")
+    result = supabase.table("receipts").select("*").eq("business_id", business["id"]).order("uploaded_at", desc=True).execute()
     return [to_receipt(r) for r in result.data]
 
 
@@ -344,10 +368,8 @@ class UpdateReceiptBody(BaseModel):
 async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=Depends(get_current_user)):
     """Allow users to manually correct OCR-extracted fields."""
     supabase = get_supabase()
-    biz_data = get_business_for_user(supabase, current_user.user.id)
-    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
-    if not biz.data:
-        raise HTTPException(status_code=400, detail="Business not found")
+    business = resolve_module_access(supabase, current_user.user.id, "receipts")
+    biz = type("R", (), {"data": [{"id": business["id"]}]})()
     
     update_data = {}
     if body.merchant is not None:
@@ -373,11 +395,8 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
 @receipt_routes.post("/receipts", status_code=201)
 async def upload_receipt(request: Request, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz_data = get_business_for_user(supabase, current_user.user.id)
-    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
-    if not biz.data:
-        raise HTTPException(status_code=400, detail="Business not found")
-    business_id = biz.data[0]["id"]
+    business = resolve_module_access(supabase, current_user.user.id, "receipts")
+    business_id = business["id"]
 
     supabase_url = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
     content_type = request.headers.get("content-type", "")
@@ -458,11 +477,8 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
 @receipt_routes.delete("/receipts/{receipt_id}")
 async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz_data = get_business_for_user(supabase, current_user.user.id)
-    biz = type("R", (), {"data": [{"id": biz_data["id"]}] if biz_data else []})()
-    if not biz.data:
-        raise HTTPException(status_code=400, detail="Business not found")
-    business_id = biz.data[0]["id"]
+    business = resolve_module_access(supabase, current_user.user.id, "receipts")
+    business_id = business["id"]
     result = supabase.table("receipts").delete().eq("id", receipt_id).eq("business_id", business_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Receipt not found")

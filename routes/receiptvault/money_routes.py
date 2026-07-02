@@ -5,7 +5,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user
+from routes.receiptvault.routes import get_current_user, resolve_module_access
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -38,29 +38,7 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_owner_business(supabase, user_id: str):
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    return result.data[0] if result.data else None
-
-
-def get_member_business(supabase, user_id: str):
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
-
-
-def resolve_access(supabase, user_id: str):
-    """Returns (business, is_owner). Raises 404 if no business."""
-    biz = get_owner_business(supabase, user_id)
-    if biz:
-        return biz, True
-    biz = get_member_business(supabase, user_id)
-    if biz:
-        return biz, False
-    raise HTTPException(status_code=404, detail="Business not found")
+# Access control lives in routes.py: resolve_module_access(supabase, user_id, "money_box")
 
 
 def to_entry(row: dict) -> dict:
@@ -95,7 +73,7 @@ class PacketRequestBody(BaseModel):
 @money_routes.get("/money-entries")
 async def list_money_entries(start: Optional[str] = None, end: Optional[str] = None, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business, _ = resolve_access(supabase, current_user.user.id)
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
     query = supabase.table("rv_money_entries").select("*").eq("business_id", business["id"])
     if start:
         query = query.gte("entry_date", start)
@@ -113,7 +91,7 @@ async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_cur
         raise HTTPException(status_code=400, detail="Amount must be greater than zero")
 
     supabase = get_supabase()
-    business, _ = resolve_access(supabase, current_user.user.id)
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
     data = {
         "business_id": business["id"],
         "user_id": current_user.user.id,
@@ -133,7 +111,7 @@ async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_cur
 @money_routes.delete("/money-entries/{entry_id}")
 async def delete_money_entry(entry_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business, _ = resolve_access(supabase, current_user.user.id)
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
     result = supabase.table("rv_money_entries").delete()\
         .eq("id", entry_id).eq("business_id", business["id"]).execute()
     if not result.data:
@@ -294,7 +272,7 @@ def _build_pdf(entries: List[dict], period_start: str, period_end: str,
 @money_routes.post("/money-packets/generate")
 async def generate_money_packet(body: PacketRequestBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business, _ = resolve_access(supabase, current_user.user.id)
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
 
     rows = supabase.table("rv_money_entries").select("*")\
         .eq("business_id", business["id"])\
@@ -342,7 +320,7 @@ async def generate_money_packet(body: PacketRequestBody, current_user=Depends(ge
 @money_routes.get("/money-packets")
 async def list_money_packets(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    business, _ = resolve_access(supabase, current_user.user.id)
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
     rows = supabase.table("rv_money_packets").select("*")\
         .eq("business_id", business["id"]).order("created_at", desc=True).execute()
     return [{

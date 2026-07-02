@@ -4,7 +4,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user, get_business_for_user, to_receipt
+from typing import List
+from routes.receiptvault.routes import get_current_user, get_business_for_user, to_receipt, ALL_MODULES
 import httpx
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
@@ -46,6 +47,7 @@ def to_member(row):
         "email": row.get("email"),
         "role": row.get("role", "employee"),
         "status": row.get("status", "active"),
+        "modules": row.get("modules") or [],
         "invitedAt": str(row.get("invited_at", "")),
         "joinedAt": str(row.get("joined_at", "")) if row.get("joined_at") else None,
     }
@@ -53,10 +55,12 @@ def to_member(row):
 class InviteMemberBody(BaseModel):
     email: str
     role: Optional[str] = "employee"  # employee | manager
+    modules: List[str] = []  # which features this person can use: receipts, money_box, mileage, invoices, inventory
 
 class UpdateMemberBody(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
+    modules: Optional[List[str]] = None
 
 async def get_business(current_user):
     supabase = get_supabase()
@@ -90,12 +94,14 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
         raise HTTPException(status_code=409, detail="This person is already on your team")
 
     # Create pending invite record
+    valid_modules = [m for m in body.modules if m in ALL_MODULES]
     result = supabase.table("business_users").insert({
         "business_id": business["id"],
         "user_id": f"pending_{body.email}",
         "email": body.email,
         "role": body.role or "employee",
         "status": "invited",
+        "modules": valid_modules,
     }).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to create invite")
@@ -139,6 +145,7 @@ async def update_member(member_id: str, body: UpdateMemberBody, current_user=Dep
     update_data = {}
     if body.role is not None: update_data["role"] = body.role
     if body.status is not None: update_data["status"] = body.status
+    if body.modules is not None: update_data["modules"] = [m for m in body.modules if m in ALL_MODULES]
     result = supabase.table("business_users").update(update_data)\
         .eq("id", member_id).eq("business_id", business["id"]).execute()
     if not result.data:

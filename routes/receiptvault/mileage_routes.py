@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user
+from routes.receiptvault.routes import get_current_user, resolve_module_access
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -100,6 +100,7 @@ class UpdateMileageBody(BaseModel):
 @mileage_routes.get("/mileage")
 async def list_mileage(current_user=Depends(get_current_user)):
     supabase = get_supabase()
+    resolve_module_access(supabase, current_user.user.id, "mileage")  # 403s if this person wasn't given Mileage access
     business, is_owner = resolve_access(supabase, current_user.user.id)
 
     role = "owner" if is_owner else (get_role(supabase, current_user.user.id) or "employee")
@@ -128,6 +129,7 @@ async def list_mileage(current_user=Depends(get_current_user)):
 @mileage_routes.post("/mileage")
 async def create_mileage(body: CreateMileageBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
+    resolve_module_access(supabase, current_user.user.id, "mileage")  # 403s if this person wasn't given Mileage access
     business, is_owner = resolve_access(supabase, current_user.user.id)
     data = {
         "business_id": business["id"],
@@ -147,6 +149,7 @@ async def create_mileage(body: CreateMileageBody, current_user=Depends(get_curre
 @mileage_routes.patch("/mileage/{entry_id}")
 async def update_mileage(entry_id: str, body: UpdateMileageBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
+    resolve_module_access(supabase, current_user.user.id, "mileage")  # 403s if this person wasn't given Mileage access
     business, is_owner = resolve_access(supabase, current_user.user.id)
     update_data = {}
     if body.date is not None: update_data["date"] = body.date
@@ -168,6 +171,7 @@ async def update_mileage(entry_id: str, body: UpdateMileageBody, current_user=De
 @mileage_routes.delete("/mileage/{entry_id}")
 async def delete_mileage(entry_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
+    resolve_module_access(supabase, current_user.user.id, "mileage")  # 403s if this person wasn't given Mileage access
     business, is_owner = resolve_access(supabase, current_user.user.id)
     query = supabase.table("rv_mileage_entries").delete()\
         .eq("id", entry_id).eq("business_id", business["id"])
