@@ -217,32 +217,29 @@ class AcceptInviteBody(BaseModel):
 
 @team_routes.post("/team/accept-invite")
 async def accept_invite(body: AcceptInviteBody, current_user=Depends(get_current_user)):
-    """Called after signup via invite link — links the new user to the business."""
+    """Called after signup via invite link — links the new user to the business.
+    Only works if the currently logged-in account's email matches the invite;
+    otherwise whoever happens to be logged in (e.g. the owner testing a link)
+    silently gets attached instead of the person actually invited."""
     supabase = get_supabase()
     user_id = current_user.user.id
-    user_email = current_user.user.email
+    user_email = (current_user.user.email or "").strip().lower()
+    invited_email = (body.email or "").strip().lower()
 
-    # Find the pending invite
-    # Look for pending invite by email (user_id is placeholder until accepted)
-    invite = supabase.table("business_users")         .select("*")         .eq("business_id", body.businessId)         .eq("email", body.email)         .execute()
+    if user_email != invited_email:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This invite was sent to {body.email}, but you're signed in as {current_user.user.email}. Log out and sign up with the invited email instead."
+        )
 
-    if invite.data:
-        # Update to active with real user_id
-        supabase.table("business_users").update({
-            "user_id": user_id,
-            "status": "active",
-            "joined_at": datetime.utcnow().isoformat(),
-        }).eq("id", invite.data[0]["id"]).execute()
-        return {"ok": True, "joined": True}
+    invite = supabase.table("business_users").select("*").eq("business_id", body.businessId).eq("email", body.email).execute()
 
-    # No invite record — add them directly
-    supabase.table("business_users").insert({
-        "business_id": body.businessId,
+    if not invite.data:
+        raise HTTPException(status_code=404, detail="No pending invite found for this email and business.")
+
+    supabase.table("business_users").update({
         "user_id": user_id,
-        "email": user_email or body.email,
-        "role": "employee",
         "status": "active",
         "joined_at": datetime.utcnow().isoformat(),
-    }).execute()
-
+    }).eq("id", invite.data[0]["id"]).execute()
     return {"ok": True, "joined": True}
