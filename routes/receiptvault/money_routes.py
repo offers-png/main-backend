@@ -52,6 +52,7 @@ def to_entry(row: dict) -> dict:
         "amount": float(row.get("amount") or 0),
         "paymentMethod": row.get("payment_method"),
         "note": row.get("note"),
+        "cashSource": row.get("cash_source"),
         "createdAt": str(row.get("created_at", "")),
     }
 
@@ -63,6 +64,7 @@ class CreateEntryBody(BaseModel):
     amount: float
     paymentMethod: Optional[str] = None
     note: Optional[str] = None
+    cashSource: Optional[str] = None  # "todays_draw" | "cash_on_hand" — cash expenses only, label only, doesn't change totals
 
 
 class PacketRequestBody(BaseModel):
@@ -83,12 +85,35 @@ async def list_money_entries(start: Optional[str] = None, end: Optional[str] = N
     return [to_entry(r) for r in (rows.data or [])]
 
 
+@money_routes.get("/money-entries/cash-on-hand")
+async def get_cash_on_hand(current_user=Depends(get_current_user)):
+    """Running total: every dollar of real cash in, minus every dollar of real
+    cash out, across ALL history — never resets, carries forward forever.
+    Card In and Checks never touch this; money that never sat in the drawer
+    can't leave the drawer."""
+    supabase = get_supabase()
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
+    rows = supabase.table("rv_money_entries").select("entry_type, category, amount, payment_method")\
+        .eq("business_id", business["id"]).execute()
+
+    balance = 0.0
+    for r in (rows.data or []):
+        amt = float(r.get("amount") or 0)
+        if r.get("entry_type") == "income" and r.get("category") == "sales_cash":
+            balance += amt
+        elif r.get("entry_type") == "expense" and r.get("payment_method") == "cash":
+            balance -= amt
+    return {"cashOnHand": round(balance, 2)}
+
+
 @money_routes.post("/money-entries")
 async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_current_user)):
     if body.entryType not in ("income", "expense"):
         raise HTTPException(status_code=400, detail="entryType must be 'income' or 'expense'")
     if body.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be greater than zero")
+    if body.cashSource and body.cashSource not in ("todays_draw", "cash_on_hand"):
+        raise HTTPException(status_code=400, detail="cashSource must be 'todays_draw' or 'cash_on_hand'")
 
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "money_box")
@@ -101,6 +126,7 @@ async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_cur
         "amount": body.amount,
         "payment_method": body.paymentMethod,
         "note": body.note,
+        "cash_source": body.cashSource if (body.entryType == "expense" and body.paymentMethod == "cash") else None,
     }
     result = supabase.table("rv_money_entries").insert(data).execute()
     if not result.data:
