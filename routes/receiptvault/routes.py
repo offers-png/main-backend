@@ -117,6 +117,7 @@ def to_business(row: dict) -> dict:
         "sendEnabled": row.get("send_enabled", 1),
         "ownerPhone": row.get("owner_phone"),
         "taxId": row.get("tax_id"),
+        "weekStartDay": row.get("week_start_day", 0),
         "createdAt": str(row.get("created_at", "")),
     }
 
@@ -285,6 +286,7 @@ class BusinessProfileBody(BaseModel):
     ownerName: str
     ownerAddress: Optional[str] = None
     taxId: Optional[str] = None
+    weekStartDay: Optional[int] = None
 
 
 @receipt_routes.post("/setup/business")
@@ -294,6 +296,9 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
 
     # Does this user already own a business?
     owned = supabase.table("businesses").select("id").eq("user_id", user_id).execute()
+
+    if body.weekStartDay is not None and not (0 <= body.weekStartDay <= 6):
+        raise HTTPException(status_code=400, detail="weekStartDay must be 0-6 (0=Sunday)")
 
     if owned.data:
         # Owner editing their own existing business. NEVER include user_id in
@@ -307,6 +312,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
+        if body.weekStartDay is not None:
+            data["week_start_day"] = body.weekStartDay
         result = supabase.table("businesses").update(data).eq("id", owned.data[0]["id"]).execute()
     else:
         # Not an owner. If they're already a team member somewhere, they don't
@@ -325,6 +332,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
+        if body.weekStartDay is not None:
+            data["week_start_day"] = body.weekStartDay
         result = supabase.table("businesses").insert(data).execute()
 
     if not result.data:
