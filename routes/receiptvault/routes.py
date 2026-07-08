@@ -149,6 +149,27 @@ async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     if "pdf" in mime_type:
         return {}
 
+    # Downscale large camera captures — the API rejects images over 5MB,
+    # and phone cameras routinely exceed that. Resizing also speeds up OCR.
+    try:
+        raw = b64lib.b64decode(image_base64)
+        if len(raw) > 1_500_000:  # anything over ~1.5MB gets resized
+            from io import BytesIO
+            from PIL import Image, ImageOps
+
+            img = Image.open(BytesIO(raw))
+            img = ImageOps.exif_transpose(img)  # respect phone rotation
+            img.thumbnail((2000, 2000))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            image_base64 = b64lib.b64encode(buf.getvalue()).decode("utf-8")
+            mime_type = "image/jpeg"
+            print(f"[extract] resized image {len(raw)} -> {buf.tell()} bytes")
+    except Exception as resize_err:
+        print(f"[extract] resize failed ({resize_err}) — sending original")
+
     prompt = f"""You are an expert receipt and invoice parser for a convenience store owner.
 
 Extract the following from this receipt/invoice image and return ONLY valid JSON:
