@@ -142,6 +142,7 @@ async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     """Use Claude Vision to extract merchant, amount, date, category from receipt image."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
+        print("[extract] ANTHROPIC_API_KEY not set on Render — skipping OCR, fields will be blank")
         return {}
 
     # Claude Vision only supports images, not PDFs
@@ -203,6 +204,7 @@ CRITICAL RULES:
                 },
             )
         if res.status_code != 200:
+            print(f"[extract] Anthropic API error {res.status_code}: {res.text[:300]}")
             return {}
         data = res.json()
         text = data["content"][0]["text"].strip()
@@ -382,12 +384,73 @@ async def list_receipts(current_user=Depends(get_current_user)):
 
 
 @receipt_routes.get("/receipts/{receipt_id}")
-async def get_receipt(receipt_id: str):
+async def get_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    result = supabase.table("receipts").select("*").eq("id", receipt_id).execute()
+    business = get_business_for_user(supabase, current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    result = (
+        supabase.table("receipts")
+        .select("*")
+        .eq("id", receipt_id)
+        .eq("business_id", business["id"])
+        .execute()
+    )
     if not result.data:
         raise HTTPException(status_code=404, detail="Receipt not found")
     return to_receipt(result.data[0])
+
+
+@receipt_routes.post("/receipts/{receipt_id}/extract")
+async def reextract_receipt(receipt_id: str, current_user=Depends(get_current_user)):
+    """Re-run Claude OCR on an existing receipt and fill any empty fields.
+    Use this to backfill receipts uploaded while extraction was failing."""
+    supabase = get_supabase()
+    business = get_business_for_user(supabase, current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    result = (
+        supabase.table("receipts")
+        .select("*")
+        .eq("id", receipt_id)
+        .eq("business_id", business["id"])
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    row = result.data[0]
+
+    # Download the file from storage using the object path from file_path
+    file_path = row.get("file_path", "")
+    marker = "/receipts/"
+    if marker not in file_path:
+        raise HTTPException(status_code=400, detail="Cannot resolve storage path")
+    object_path = file_path.split(marker, 1)[1]
+    try:
+        content = supabase.storage.from_("receipts").download(object_path)
+    except Exception as dl_err:
+        raise HTTPException(status_code=500, detail=f"Could not download file: {dl_err}")
+
+    ext = os.path.splitext(object_path)[1].lower()
+    mime = "application/pdf" if ext == ".pdf" else f"image/{(ext[1:] or 'jpeg').replace('jpg', 'jpeg')}"
+    ocr_data = await extract_receipt_data(b64lib.b64encode(content).decode("utf-8"), mime)
+    if not ocr_data:
+        raise HTTPException(status_code=502, detail="Extraction returned nothing — check Render logs for [extract] errors")
+
+    update_data = {}
+    if not row.get("merchant") and ocr_data.get("merchant"):
+        update_data["merchant"] = ocr_data["merchant"]
+    if row.get("amount") is None and ocr_data.get("amount") is not None:
+        update_data["amount"] = float(ocr_data["amount"])
+    if not row.get("receipt_date") and ocr_data.get("receipt_date"):
+        update_data["receipt_date"] = ocr_data["receipt_date"]
+    if not row.get("category") and ocr_data.get("category"):
+        update_data["category"] = ocr_data["category"]
+
+    if update_data:
+        updated = supabase.table("receipts").update(update_data).eq("id", receipt_id).execute()
+        return to_receipt(updated.data[0])
+    return to_receipt(row)
 
 
 class UpdateReceiptBody(BaseModel):
