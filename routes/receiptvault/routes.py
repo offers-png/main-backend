@@ -149,6 +149,12 @@ async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
     if "pdf" in mime_type:
         return {}
 
+    # Normalize mime — in-app camera uploads send "image/jpg", which the API
+    # rejects (it only accepts image/jpeg, png, gif, webp)
+    mime_type = (mime_type or "").lower().strip()
+    if mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+        mime_type = "image/png" if "png" in mime_type else "image/jpeg"
+
     # Downscale large camera captures — the API rejects images over 5MB,
     # and phone cameras routinely exceed that. Resizing also speeds up OCR.
     try:
