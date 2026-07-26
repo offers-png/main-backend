@@ -8,7 +8,7 @@ import base64 as b64lib
 import time
 import random
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from supabase import create_client, Client
 
@@ -101,6 +101,30 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+
+async def require_active_subscription(current_user=Depends(get_current_user)):
+    """Hard-lockout gate. Raises 402 if the business has no paid plan and
+    no active trial. Applies to the business the CURRENT user belongs to —
+    whether they're the owner or a team member — since team members don't
+    have their own billing state, only the owner's business does.
+
+    Deliberately permissive if no business is found yet (e.g. a team
+    member mid-invite-acceptance, or a stale token) — that's a 404
+    elsewhere, not a billing problem, so we let it pass through here.
+    """
+    supabase = get_supabase()
+    business, _role = resolve_role(supabase, current_user.user.id)
+    if business is None:
+        return
+    plan = business.get("plan")
+    trial_ends_at = business.get("trial_ends_at")
+    in_trial = bool(trial_ends_at and trial_ends_at > datetime.utcnow().isoformat())
+    if not plan and not in_trial:
+        raise HTTPException(
+            status_code=402,
+            detail="Your free trial has ended. Subscribe to keep using ReceiptVault.",
+        )
 
 
 def to_business(row: dict) -> dict:
@@ -352,12 +376,16 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             raise HTTPException(status_code=403, detail="Only the business owner can edit the business profile.")
         # Brand new user with no business and no team membership — normal
         # first-time signup flow. They become the owner of a new business.
+        # Start their 7-day trial now — without this, a fresh signup would
+        # have no plan and no trial, and hard-lockout enforcement would
+        # block them before they ever got to use the product.
         data = {
             "user_id": user_id,
             "business_name": body.businessName,
             "business_address": body.businessAddress,
             "owner_name": body.ownerName,
             "owner_address": body.ownerAddress,
+            "trial_ends_at": (datetime.utcnow() + timedelta(days=7)).isoformat(),
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
@@ -402,7 +430,7 @@ async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_
     return to_business(result.data[0])
 
 
-@receipt_routes.get("/receipts")
+@receipt_routes.get("/receipts", dependencies=[Depends(require_active_subscription)])
 async def list_receipts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "receipts")
@@ -410,7 +438,7 @@ async def list_receipts(current_user=Depends(get_current_user)):
     return [to_receipt(r) for r in result.data]
 
 
-@receipt_routes.get("/receipts/{receipt_id}")
+@receipt_routes.get("/receipts/{receipt_id}", dependencies=[Depends(require_active_subscription)])
 async def get_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = get_business_for_user(supabase, current_user.user.id)
@@ -428,7 +456,7 @@ async def get_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     return to_receipt(result.data[0])
 
 
-@receipt_routes.post("/receipts/{receipt_id}/extract")
+@receipt_routes.post("/receipts/{receipt_id}/extract", dependencies=[Depends(require_active_subscription)])
 async def reextract_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     """Re-run Claude OCR on an existing receipt and fill any empty fields.
     Use this to backfill receipts uploaded while extraction was failing."""
@@ -488,7 +516,7 @@ class UpdateReceiptBody(BaseModel):
     notes: Optional[str] = None
 
 
-@receipt_routes.patch("/receipts/{receipt_id}")
+@receipt_routes.patch("/receipts/{receipt_id}", dependencies=[Depends(require_active_subscription)])
 async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=Depends(get_current_user)):
     """Allow users to manually correct OCR-extracted fields."""
     supabase = get_supabase()
@@ -516,7 +544,7 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
     return to_receipt(result.data[0])
 
 
-@receipt_routes.post("/receipts", status_code=201)
+@receipt_routes.post("/receipts", status_code=201, dependencies=[Depends(require_active_subscription)])
 async def upload_receipt(request: Request, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "receipts")
@@ -598,7 +626,7 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
     return JSONResponse(status_code=201, content=to_receipt(receipt.data[0]))
 
 
-@receipt_routes.delete("/receipts/{receipt_id}")
+@receipt_routes.delete("/receipts/{receipt_id}", dependencies=[Depends(require_active_subscription)])
 async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "receipts")
@@ -610,7 +638,7 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
 
 
 
-@receipt_routes.post("/resend-all")
+@receipt_routes.post("/resend-all", dependencies=[Depends(require_active_subscription)])
 async def resend_all(current_user=Depends(get_current_user)):
     """Mark all receipts as unsent then send them again."""
     supabase = get_supabase()
@@ -697,7 +725,7 @@ async def resend_all(current_user=Depends(get_current_user)):
     asyncio.create_task(send_in_background())
     return {"ok": True, "sent": sent_count}
 
-@receipt_routes.post("/send-now")
+@receipt_routes.post("/send-now", dependencies=[Depends(require_active_subscription)])
 async def send_now(current_user=Depends(get_current_user)):
     import asyncio
     supabase = get_supabase()
