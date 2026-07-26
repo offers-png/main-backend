@@ -41,6 +41,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://receipts.dealdily.com",
+        "https://receiptkept.com",
+        "https://www.receiptkept.com",
         "https://receiptvaultdealdily.netlify.app",
         "https://sparkling-hotteok-81fc0b.netlify.app",
         "https://issa-uzair.netlify.app",
