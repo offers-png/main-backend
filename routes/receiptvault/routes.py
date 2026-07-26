@@ -7,10 +7,23 @@ import httpx
 import base64 as b64lib
 import time
 import random
+import string
 import json
+import stripe
 from datetime import datetime, timedelta
 
 from supabase import create_client, Client
+
+# Read independently rather than importing from billing_routes.py, which
+# already imports get_current_user FROM this file — importing back from it
+# here would create a circular import.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+
+# A special, non-customer referral code Saleh can hand out directly (texts,
+# DMs, in person) that gives the NEW signup an extended 30-day trial instead
+# of the standard 7 days. Unlike a normal referral code, this isn't tied to
+# any business and rewards nobody — it's a straight promo for the signup.
+FOUNDER_PROMO_CODE = "TRY30"
 
 receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
@@ -127,7 +140,7 @@ async def require_active_subscription(current_user=Depends(get_current_user)):
         )
 
 
-def to_business(row: dict) -> dict:
+def to_business(row: dict, referral_count: int = 0) -> dict:
     return {
         "id": row.get("id"),
         "userId": row.get("user_id"),
@@ -143,6 +156,8 @@ def to_business(row: dict) -> dict:
         "taxId": row.get("tax_id"),
         "weekStartDay": row.get("week_start_day", 0),
         "createdAt": str(row.get("created_at", "")),
+        "referralCode": row.get("referral_code"),
+        "referralCount": referral_count,
     }
 
 
@@ -290,7 +305,14 @@ async def get_business(current_user=Depends(get_current_user)):
     result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
     if result.data:
         business = result.data[0]
-        out = to_business(business)
+        referral_rows = (
+            supabase.table("referrals")
+            .select("id")
+            .eq("referrer_business_id", business["id"])
+            .execute()
+        )
+        referral_count = len(referral_rows.data or [])
+        out = to_business(business, referral_count)
         out["role"] = "owner"
         out["modules"] = ALL_MODULES
         if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
@@ -340,6 +362,71 @@ class BusinessProfileBody(BaseModel):
     ownerAddress: Optional[str] = None
     taxId: Optional[str] = None
     weekStartDay: Optional[int] = None
+    referralCode: Optional[str] = None
+
+
+def generate_referral_code(supabase) -> str:
+    """8-char uppercase alphanumeric code, excluding ambiguous characters
+    (0/O, 1/I/L) so people can read them back over text/phone without
+    confusion. Retries on the rare collision."""
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    for _ in range(10):
+        code = "".join(random.choices(alphabet, k=8))
+        existing = supabase.table("businesses").select("id").eq("referral_code", code).execute()
+        if not existing.data:
+            return code
+    # Astronomically unlikely, but fail loudly rather than silently reuse a code
+    raise HTTPException(status_code=500, detail="Could not generate a unique referral code, please try again")
+
+
+async def apply_referral_reward(supabase, referrer: dict):
+    """Rewards the REFERRER (not the new signup) with 1 month free, for
+    each friend who signs up with their code. If they're still in trial
+    (or between trial and paying), just extend trial_ends_at by 30 days —
+    no billing system involved yet. If they're already a paying subscriber,
+    attach a one-time 100%-off coupon to their next invoice instead, since
+    their access is controlled by Stripe at that point, not trial_ends_at.
+    """
+    reward_type = None
+
+    if referrer.get("plan") and referrer.get("stripe_subscription_id"):
+        # Paying customer — apply a one-time free-month coupon to their
+        # existing subscription. Requires the coupon "referral-1-month-free"
+        # (100% off, duration=once) to already exist in the Stripe account.
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"https://api.stripe.com/v1/subscriptions/{referrer['stripe_subscription_id']}",
+                headers={
+                    "Authorization": f"Bearer {STRIPE_SECRET_KEY}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={"discounts[0][coupon]": "referral-1-month-free"},
+            )
+            if r.status_code >= 400:
+                # Don't let a Stripe hiccup block the referred signup itself —
+                # log it so it can be applied manually, rather than raising.
+                print(f"[referral] Failed to apply Stripe coupon for business {referrer['id']}: {r.text}")
+            else:
+                reward_type = "stripe_coupon"
+    else:
+        # In trial (or trial already lapsed) — extend from whichever is
+        # later: their current trial end, or right now. This handles both
+        # "still in trial" (stacks on top) and "trial already ended"
+        # (starts a fresh 30 days from today) correctly.
+        current_trial_end = referrer.get("trial_ends_at")
+        base = datetime.utcnow()
+        if current_trial_end:
+            try:
+                parsed = datetime.fromisoformat(current_trial_end.replace("Z", "+00:00")).replace(tzinfo=None)
+                if parsed > base:
+                    base = parsed
+            except ValueError:
+                pass
+        new_trial_end = (base + timedelta(days=30)).isoformat()
+        supabase.table("businesses").update({"trial_ends_at": new_trial_end}).eq("id", referrer["id"]).execute()
+        reward_type = "trial_extension"
+
+    return reward_type
 
 
 @receipt_routes.post("/setup/business")
@@ -379,19 +466,52 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         # Start their 7-day trial now — without this, a fresh signup would
         # have no plan and no trial, and hard-lockout enforcement would
         # block them before they ever got to use the product.
+        #
+        # Exception: Saleh's own founder promo code extends the new
+        # signup's OWN trial to 30 days instead of 7. Unlike a normal
+        # referral code, nobody gets rewarded for this one — it's not
+        # tied to any business, it's a straight incentive to try longer.
+        is_founder_promo = bool(body.referralCode) and body.referralCode.strip().upper() == FOUNDER_PROMO_CODE
+        trial_days = 30 if is_founder_promo else 7
         data = {
             "user_id": user_id,
             "business_name": body.businessName,
             "business_address": body.businessAddress,
             "owner_name": body.ownerName,
             "owner_address": body.ownerAddress,
-            "trial_ends_at": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+            "trial_ends_at": (datetime.utcnow() + timedelta(days=trial_days)).isoformat(),
+            "referral_code": generate_referral_code(supabase),
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
         if body.weekStartDay is not None:
             data["week_start_day"] = body.weekStartDay
+
+        # If they signed up via someone's referral link, validate the code
+        # and reward the referrer — never the new signup. Silently ignore
+        # invalid/unknown codes rather than blocking signup over it. The
+        # founder promo code is handled above, not here — it's not a real
+        # referrer, so it never reaches this lookup.
+        referrer = None
+        if body.referralCode and not is_founder_promo:
+            referrer_lookup = (
+                supabase.table("businesses").select("*").eq("referral_code", body.referralCode.strip().upper()).execute()
+            )
+            if referrer_lookup.data:
+                referrer = referrer_lookup.data[0]
+                data["referred_by_code"] = body.referralCode.strip().upper()
+
         result = supabase.table("businesses").insert(data).execute()
+
+        if result.data and referrer:
+            reward_type = await apply_referral_reward(supabase, referrer)
+            if reward_type:
+                supabase.table("referrals").insert({
+                    "referrer_business_id": referrer["id"],
+                    "referred_business_id": result.data[0]["id"],
+                    "referral_code": data["referred_by_code"],
+                    "reward_type": reward_type,
+                }).execute()
 
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to save business")
