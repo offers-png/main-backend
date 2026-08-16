@@ -14,6 +14,12 @@ from datetime import datetime, timedelta
 
 from supabase import create_client, Client
 
+# Reuses the same email-sending helper and Saleh's own owner_email — rather
+# than duplicating a second copy of _send_email/_wrap, so there's only one
+# place that knows how ReceiptVault sends transactional email.
+from routes.receiptvault.trial_emails import _send_email, _wrap
+ADMIN_NOTIFICATION_EMAIL = os.getenv("ADMIN_NOTIFICATION_EMAIL", "saleh852@gmail.com")
+
 # Read independently rather than importing from billing_routes.py, which
 # already imports get_current_user FROM this file — importing back from it
 # here would create a circular import.
@@ -568,6 +574,26 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
                 data["referred_by_code"] = body.referralCode.strip().upper()
 
         result = supabase.table("businesses").insert(data).execute()
+
+        # Notify Saleh directly whenever a new business signs up — without
+        # this, the only way to know is checking the database by hand,
+        # which is how the Hamooda trial went unnoticed until it was too
+        # late to bring him back. Fire-and-forget: a notification failure
+        # should never block the signup itself from completing.
+        if result.data:
+            try:
+                await _send_email(
+                    to=ADMIN_NOTIFICATION_EMAIL,
+                    subject=f"New ReceiptVault signup: {body.businessName}",
+                    html=_wrap(f"""
+                    <p><b>{body.businessName}</b> just signed up.</p>
+                    <p>Owner: {body.ownerName}<br>
+                    Email: {current_user.user.email}<br>
+                    Trial: {trial_days} days{' (founder promo)' if is_founder_promo else ''}</p>
+                    """),
+                )
+            except Exception as e:
+                print(f"[signup] admin notification failed: {e}")
 
         if result.data and referrer:
             reward_type = await apply_referral_reward(supabase, referrer)
