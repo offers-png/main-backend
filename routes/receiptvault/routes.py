@@ -17,7 +17,7 @@ from supabase import create_client, Client
 # Reuses the same email-sending helper and Saleh's own owner_email — rather
 # than duplicating a second copy of _send_email/_wrap, so there's only one
 # place that knows how ReceiptVault sends transactional email.
-from routes.receiptvault.trial_emails import _send_email, _wrap
+from routes.receiptvault.trial_emails import _send_email, _wrap, FRONTEND_URL
 ADMIN_NOTIFICATION_EMAIL = os.getenv("ADMIN_NOTIFICATION_EMAIL", "saleh852@gmail.com")
 
 # Read independently rather than importing from billing_routes.py, which
@@ -594,6 +594,26 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
                 )
             except Exception as e:
                 print(f"[signup] admin notification failed: {e}")
+
+            # Welcome email to the customer themselves — right now signup is
+            # total silence until the day-5 trial reminder, five days later.
+            # Kept deliberately simple: no jargon, one thing to do next
+            # (scan a receipt), matching the same zero-effort framing as the
+            # rest of the app. Same fire-and-forget rule: never block signup.
+            try:
+                await _send_email(
+                    to=current_user.user.email,
+                    subject="Welcome to ReceiptVault",
+                    html=_wrap(f"""
+                    <p>Hi {body.ownerName or 'there'},</p>
+                    <p><b>{body.businessName}</b> is set up and your {trial_days}-day free trial has started.</p>
+                    <p>Take a photo of a receipt and ReceiptVault handles the rest &mdash; no typing, no
+                    spreadsheets, no learning curve.</p>
+                    <a href="{FRONTEND_URL}" style="display:inline-block;background:#1a6b3a;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Scan Your First Receipt</a>
+                    """),
+                )
+            except Exception as e:
+                print(f"[signup] welcome email failed: {e}")
 
         if result.data and referrer:
             reward_type = await apply_referral_reward(supabase, referrer)
