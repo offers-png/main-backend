@@ -877,6 +877,7 @@ async def resend_all(current_user=Depends(get_current_user)):
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
             from routes.receiptvault.money_routes import sum_ledger_income
+            from routes.receiptvault.dropbox_routes import create_dropbox_token
             period_label = datetime.now().strftime("%B %Y") + " Expenses"
             biz_name = business.get("business_name", "")
             safe_name = biz_name.replace(" ", "_")
@@ -884,6 +885,13 @@ async def resend_all(current_user=Depends(get_current_user)):
             month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
             today_str = datetime.now().strftime("%Y-%m-%d")
             gross_income = sum_ledger_income(supabase, business["id"], month_start, today_str)
+
+            dropbox_url = None
+            try:
+                dropbox_token = create_dropbox_token(supabase, business["id"], created_by=current_user.user.id, label=f"Resend — {period_label}")
+                dropbox_url = dropbox_token["url"]
+            except Exception as dropbox_err:
+                print(f"[resend-all] dropbox token creation failed — sending without one: {dropbox_err}")
 
             # Generate PDF cover sheet
             pdf_bytes = await generate_cover_pdf(
@@ -918,6 +926,7 @@ async def resend_all(current_user=Depends(get_current_user)):
                         "pdfFilename": pdf_filename,
                         "excelBase64": excel_base64,
                         "excelFilename": excel_filename,
+                        "dropboxUrl": dropbox_url,
                     },
                 )
 
@@ -980,6 +989,7 @@ async def send_now(current_user=Depends(get_current_user)):
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
             from routes.receiptvault.money_routes import sum_ledger_income
+            from routes.receiptvault.dropbox_routes import create_dropbox_token
             period_label = datetime.now().strftime("%B %Y") + " Expenses"
             biz_name = business.get("business_name", "")
             safe_name = biz_name.replace(" ", "_")
@@ -987,6 +997,13 @@ async def send_now(current_user=Depends(get_current_user)):
             month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
             today_str = datetime.now().strftime("%Y-%m-%d")
             gross_income = sum_ledger_income(supabase, business["id"], month_start, today_str)
+
+            dropbox_url = None
+            try:
+                dropbox_token = create_dropbox_token(supabase, business["id"], created_by=current_user.user.id, label=f"Send now — {period_label}")
+                dropbox_url = dropbox_token["url"]
+            except Exception as dropbox_err:
+                print(f"[send-now] dropbox token creation failed — sending without one: {dropbox_err}")
 
             # Generate PDF cover sheet
             pdf_bytes = await generate_cover_pdf(
@@ -1021,6 +1038,7 @@ async def send_now(current_user=Depends(get_current_user)):
                         "pdfFilename": pdf_filename,
                         "excelBase64": excel_base64,
                         "excelFilename": excel_filename,
+                        "dropboxUrl": dropbox_url,
                     },
                 )
 
