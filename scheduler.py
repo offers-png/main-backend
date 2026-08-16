@@ -107,10 +107,15 @@ async def send_for_business(business: dict):
     try:
         from pdf_generator import generate_cover_pdf
         from excel_generator import build_excel
+        from routes.receiptvault.money_routes import sum_ledger_income
 
         month_str    = datetime.now().strftime("%Y-%m")
         period_label = datetime.now().strftime("%B %Y") + " Expenses"
         safe_name    = biz_name.replace(" ", "_")
+
+        month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        gross_income = sum_ledger_income(supabase, biz_id, month_start, today_str)
 
         pdf_bytes = await generate_cover_pdf(
             business_name=biz_name,
@@ -123,7 +128,7 @@ async def send_for_business(business: dict):
             business_name=biz_name,
             period_label=period_label,
             receipts=receipts,
-            gross_income=0.0,
+            gross_income=gross_income,
         )
 
         payload = {

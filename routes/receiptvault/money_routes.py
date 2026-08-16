@@ -41,6 +41,23 @@ def get_supabase():
 # Access control lives in routes.py: resolve_module_access(supabase, user_id, "money_box")
 
 
+def sum_ledger_income(supabase, business_id: str, start_date: str, end_date: str) -> float:
+    """Total of Money Box ledger entries with entry_type='income' for a
+    business within [start_date, end_date] (YYYY-MM-DD, inclusive). Used by
+    the accountant Excel/PDF report generators so gross income reflects the
+    ledger, not just scanned receipts."""
+    rows = (
+        supabase.table("rv_money_entries")
+        .select("amount")
+        .eq("business_id", business_id)
+        .eq("entry_type", "income")
+        .gte("entry_date", start_date)
+        .lte("entry_date", end_date)
+        .execute()
+    )
+    return sum(float(r.get("amount") or 0) for r in (rows.data or []))
+
+
 def to_entry(row: dict) -> dict:
     return {
         "id": row.get("id"),

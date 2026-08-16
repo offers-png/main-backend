@@ -201,8 +201,32 @@ def to_receipt(row: dict) -> dict:
     }
 
 
-async def extract_receipt_data(image_base64: str, mime_type: str) -> dict:
-    """Use Claude Vision to extract merchant, amount, date, category from receipt image."""
+MAX_RECEIPT_DATE_DRIFT_DAYS = 366  # ~1 year, covers leap years
+
+
+def _sanity_check_receipt_date(receipt_date: Optional[str], reference_date: datetime) -> Optional[str]:
+    """Reject an OCR-extracted date that's implausibly far (either direction)
+    from the upload date, rather than writing it straight to the database.
+    A receipt misread as 2005 should never make it into a 2026 report."""
+    if not receipt_date:
+        return None
+    try:
+        parsed = datetime.strptime(str(receipt_date)[:10], "%Y-%m-%d")
+    except ValueError:
+        print(f"[extract] rejecting unparsable OCR receipt_date: {receipt_date!r}")
+        return None
+    drift_days = abs((reference_date - parsed).days)
+    if drift_days > MAX_RECEIPT_DATE_DRIFT_DAYS:
+        print(f"[extract] rejecting OCR receipt_date {receipt_date!r} — {drift_days} days from upload date, exceeds sanity threshold")
+        return None
+    return receipt_date
+
+
+async def extract_receipt_data(image_base64: str, mime_type: str, reference_date: Optional[datetime] = None) -> dict:
+    """Use Claude Vision to extract merchant, amount, date, category from receipt image.
+    reference_date is the upload date to sanity-check the extracted date against —
+    defaults to now, but callers re-running OCR on an existing receipt should pass
+    the receipt's original uploaded_at instead."""
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         print("[extract] ANTHROPIC_API_KEY not set on Render — skipping OCR, fields will be blank")
@@ -315,6 +339,7 @@ CRITICAL RULES:
         parsed = json.loads(text.strip())
         if parsed.get("schedule_c_line") not in SCHEDULE_C_LINES:
             parsed["schedule_c_line"] = CATEGORY_TO_SCHEDULE_C_LINE.get(parsed.get("category"), "Other")
+        parsed["receipt_date"] = _sanity_check_receipt_date(parsed.get("receipt_date"), reference_date or datetime.utcnow())
         return parsed
     except Exception as ocr_err:
         print(f"OCR error: {ocr_err}")
@@ -649,7 +674,14 @@ async def reextract_receipt(receipt_id: str, current_user=Depends(get_current_us
 
     ext = os.path.splitext(object_path)[1].lower()
     mime = "application/pdf" if ext == ".pdf" else f"image/{(ext[1:] or 'jpeg').replace('jpg', 'jpeg')}"
-    ocr_data = await extract_receipt_data(b64lib.b64encode(content).decode("utf-8"), mime)
+    upload_reference_date = datetime.utcnow()
+    uploaded_at = row.get("uploaded_at")
+    if uploaded_at:
+        try:
+            upload_reference_date = datetime.fromisoformat(str(uploaded_at).replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            pass
+    ocr_data = await extract_receipt_data(b64lib.b64encode(content).decode("utf-8"), mime, reference_date=upload_reference_date)
     if not ocr_data:
         raise HTTPException(status_code=502, detail="Extraction returned nothing — check Render logs for [extract] errors")
 
@@ -844,10 +876,14 @@ async def resend_all(current_user=Depends(get_current_user)):
         try:
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
+            from routes.receiptvault.money_routes import sum_ledger_income
             period_label = datetime.now().strftime("%B %Y") + " Expenses"
             biz_name = business.get("business_name", "")
             safe_name = biz_name.replace(" ", "_")
             month_str = datetime.now().strftime("%Y-%m")
+            month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            gross_income = sum_ledger_income(supabase, business["id"], month_start, today_str)
 
             # Generate PDF cover sheet
             pdf_bytes = await generate_cover_pdf(
@@ -865,7 +901,7 @@ async def resend_all(current_user=Depends(get_current_user)):
                 business_name=biz_name,
                 period_label=period_label,
                 receipts=receipts,
-                gross_income=0.0,
+                gross_income=gross_income,
             )
             excel_base64 = b64lib.b64encode(excel_bytes).decode("utf-8")
             excel_filename = f"ReceiptVault_{safe_name}_{month_str}_RESEND.xlsx"
@@ -943,10 +979,14 @@ async def send_now(current_user=Depends(get_current_user)):
         try:
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
+            from routes.receiptvault.money_routes import sum_ledger_income
             period_label = datetime.now().strftime("%B %Y") + " Expenses"
             biz_name = business.get("business_name", "")
             safe_name = biz_name.replace(" ", "_")
             month_str = datetime.now().strftime("%Y-%m")
+            month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            gross_income = sum_ledger_income(supabase, business["id"], month_start, today_str)
 
             # Generate PDF cover sheet
             pdf_bytes = await generate_cover_pdf(
@@ -964,7 +1004,7 @@ async def send_now(current_user=Depends(get_current_user)):
                 business_name=biz_name,
                 period_label=period_label,
                 receipts=receipts,
-                gross_income=0.0,
+                gross_income=gross_income,
             )
             excel_base64 = b64lib.b64encode(excel_bytes).decode("utf-8")
             excel_filename = f"ReceiptVault_{safe_name}_{month_str}.xlsx"
