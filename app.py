@@ -15,7 +15,7 @@ from routes.receiptvault.team_routes import team_routes
 from routes.receiptvault.billing_routes import billing_routes
 from routes.receiptvault.money_routes import money_routes
 from routes.receiptvault.pnl_routes import pnl_routes
-from routes.receiptvault.dropbox_routes import dropbox_routes, feedback_routes
+from routes.receiptvault.dropbox_routes import dropbox_routes, tax_payments_routes, feedback_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
@@ -73,7 +73,11 @@ app.include_router(billing_routes)
 app.include_router(money_routes, dependencies=[Depends(require_active_subscription)])
 app.include_router(pnl_routes, dependencies=[Depends(require_active_subscription)])
 app.include_router(dropbox_routes)
-app.include_router(feedback_routes, dependencies=[Depends(require_active_subscription)])
+app.include_router(tax_payments_routes, dependencies=[Depends(require_active_subscription)])
+# Feedback is deliberately NOT gated on subscription status — one of its
+# documented contexts is "trial_expired_no_conversion", submitted by users
+# whose trial has already ended.
+app.include_router(feedback_routes)
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")

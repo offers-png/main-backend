@@ -1,15 +1,28 @@
 """
 Phase 4 — Accountant Dropbox & Trusted Payment Links.
 
+Endpoint shapes here are locked to the already-pushed frontend contract
+(claude/new-session-1yi0xs, Appendix A of the build spec):
+  POST /api/accountant-dropbox/:token   (public, no auth)
+  GET  /api/tax-payments                (authenticated)
+
 Flow:
-  1. Owner calls POST /api/dropbox/generate -> gets a single-use token/link.
+  1. Owner calls POST /api/accountant-dropbox/generate -> gets a single-use
+     token/link (this endpoint isn't part of the locked contract — the
+     frontend doesn't call it yet — but Phase 4 still requires generating
+     the link somewhere, so it lives next to the endpoint it feeds).
   2. Owner shares that link with their accountant (outside this system).
-  3. Accountant opens GET /api/dropbox/{token} (no auth) to see the drop page.
-  4. Accountant submits GET's uploads + three numbers via
-     POST /api/dropbox/{token}/submit (no auth, single use).
-  5. We attach the correct federal/state payment links SERVER-SIDE (never
-     trusting anything in the accountant's submission), mark the token used,
-     and notify the owner immediately (SMS + email).
+  3. Accountant POSTs uploads + three numbers to
+     POST /api/accountant-dropbox/{token} (no auth, single use).
+  4. We attach the correct federal/state payment links SERVER-SIDE (never
+     trusting anything in the accountant's submission), mark the token
+     used, and notify the owner immediately (SMS + email).
+  5. The owner's dashboard reads back the latest submission + links via
+     GET /api/tax-payments.
+
+Token format: opaque URL-safe random string (secrets.token_urlsafe) — the
+frontend never parses or validates it, so this choice is final per the
+build spec's open item.
 """
 
 import os
@@ -20,10 +33,11 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client
 
-from routes.receiptvault.routes import get_current_user, resolve_role
+from routes.receiptvault.routes import get_current_user, resolve_role, resolve_module_access
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -34,7 +48,8 @@ SEND_EMAIL_URL = f"{SUPABASE_URL}/functions/v1/send-invoice"
 
 TOKEN_TTL_DAYS = 30
 
-dropbox_routes = APIRouter(prefix="/api/dropbox", tags=["dropbox"])
+dropbox_routes = APIRouter(prefix="/api/accountant-dropbox", tags=["dropbox"])
+tax_payments_routes = APIRouter(prefix="/api", tags=["tax-payments"])
 feedback_routes = APIRouter(prefix="/api", tags=["feedback"])
 
 
@@ -42,7 +57,9 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# ── Generate ─────────────────────────────────────────────────────────────
+# ── Generate (owner-facing, authenticated) ──────────────────────────────────
+# NOTE: registered before the "/{token}" route below so a POST here never
+# gets swallowed by the dynamic token route.
 
 class GenerateDropboxBody(BaseModel):
     label: Optional[str] = None
@@ -77,7 +94,7 @@ async def generate_dropbox_link(body: GenerateDropboxBody, current_user=Depends(
     }
 
 
-# ── Fetch / validate a token (accountant-facing, no auth) ──────────────────
+# ── Submit (accountant-facing, public, single use) ──────────────────────────
 
 def _get_valid_token_row(supabase, token: str) -> dict:
     rows = supabase.table("rv_dropbox_tokens").select("*").eq("token", token).execute()
@@ -92,83 +109,72 @@ def _get_valid_token_row(supabase, token: str) -> dict:
     return row
 
 
-@dropbox_routes.get("/{token}")
-async def get_dropbox(token: str):
-    supabase = get_supabase()
-    row = _get_valid_token_row(supabase, token)
-    biz = supabase.table("businesses").select("business_name, owner_name").eq("id", row["business_id"]).execute()
-    business_name = biz.data[0]["business_name"] if biz.data else ""
-    return {
-        "businessName": business_name,
-        "label": row.get("label"),
-        "expiresAt": row.get("expires_at"),
-    }
+def _to_amount(form, field: str) -> float:
+    """Per the locked contract: blank/missing defaults to 0 rather than erroring."""
+    raw = form.get(field)
+    if raw is None or str(raw).strip() == "":
+        return 0.0
+    try:
+        return round(float(raw), 2)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field} must be a number")
 
 
-# ── Submit (accountant-facing, no auth, single use) ─────────────────────────
-
-@dropbox_routes.post("/{token}/submit")
+@dropbox_routes.post("/{token}")
 async def submit_dropbox(token: str, request: Request):
-    supabase = get_supabase()
-    row = _get_valid_token_row(supabase, token)
-    business_id = row["business_id"]
+    # The frontend reads { message: string } out of any non-2xx body, so
+    # every error path here returns that exact shape rather than FastAPI's
+    # default { detail: string }.
+    try:
+        supabase = get_supabase()
+        row = _get_valid_token_row(supabase, token)
+        business_id = row["business_id"]
 
-    form = await request.form()
+        form = await request.form()
+        federal_owed = _to_amount(form, "federal")
+        state_owed = _to_amount(form, "state")
+        local_owed = _to_amount(form, "local")
 
-    def _to_amount(field: str) -> float:
-        raw = form.get(field)
-        if raw is None or str(raw).strip() == "":
-            raise HTTPException(status_code=400, detail=f"{field} is required")
-        try:
-            return round(float(raw), 2)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"{field} must be a number")
+        uploaded_files = []
+        file_item = form.get("file")
+        if file_item is not None and hasattr(file_item, "read"):
+            content = await file_item.read()
+            ext = os.path.splitext(file_item.filename or "")[1] or ".bin"
+            object_path = f"dropbox-submissions/{business_id}/{token}/{int(time.time() * 1000)}-{secrets.token_hex(4)}{ext}"
+            supabase.storage.from_("receipts").upload(
+                object_path, content, {"content-type": file_item.content_type or "application/octet-stream"}
+            )
+            uploaded_files.append({
+                "name": file_item.filename,
+                "path": f"{SUPABASE_URL}/storage/v1/object/public/receipts/{object_path}",
+            })
 
-    federal_owed = _to_amount("federalOwed")
-    state_owed = _to_amount("stateOwed")
-    local_owed = _to_amount("localOwed")
+        # ── Attach the correct payment links SERVER-SIDE ────────────────────
+        # The accountant's submission has no free-text or link field —
+        # nothing they send can influence which payment link gets shown.
+        biz = supabase.table("businesses").select("*").eq("id", business_id).execute()
+        business = biz.data[0] if biz.data else {}
+        state_code = (business.get("state") or "").strip().upper()
 
-    # Accept one or many files under "files"
-    uploaded_files = []
-    file_items = form.getlist("files") if hasattr(form, "getlist") else []
-    for f in file_items:
-        if not hasattr(f, "read"):
-            continue
-        content = await f.read()
-        ext = os.path.splitext(f.filename or "")[1] or ".bin"
-        object_path = f"dropbox-submissions/{business_id}/{token}/{int(time.time() * 1000)}-{secrets.token_hex(4)}{ext}"
-        supabase.storage.from_("receipts").upload(
-            object_path, content, {"content-type": f.content_type or "application/octet-stream"}
-        )
-        uploaded_files.append({
-            "name": f.filename,
-            "path": f"{SUPABASE_URL}/storage/v1/object/public/receipts/{object_path}",
-        })
+        links = supabase.table("rv_payment_links").select("*").execute().data or []
+        federal_link = next((l["url"] for l in links if l["jurisdiction_type"] == "federal"), None)
+        state_link = next((l["url"] for l in links if l["jurisdiction_type"] == "state" and l["state_code"] == state_code), None)
 
-    # ── Attach the correct payment links SERVER-SIDE ────────────────────────
-    # The accountant's submission has no free-text or link field — nothing
-    # they send can influence which payment link gets shown.
-    biz = supabase.table("businesses").select("*").eq("id", business_id).execute()
-    business = biz.data[0] if biz.data else {}
-    state_code = (business.get("state") or "").strip().upper()
+        supabase.table("rv_dropbox_tokens").update({
+            "used_at": datetime.now(timezone.utc).isoformat(),
+            "federal_owed": federal_owed,
+            "state_owed": state_owed,
+            "local_owed": local_owed,
+            "uploaded_files": uploaded_files,
+            "federal_link": federal_link,
+            "state_link": state_link,
+        }).eq("id", row["id"]).execute()
 
-    links = supabase.table("rv_payment_links").select("*").execute().data or []
-    federal_link = next((l["url"] for l in links if l["jurisdiction_type"] == "federal"), None)
-    state_link = next((l["url"] for l in links if l["jurisdiction_type"] == "state" and l["state_code"] == state_code), None)
+        await _notify_owner(business, federal_owed, state_owed, local_owed, federal_link, state_link, len(uploaded_files))
 
-    supabase.table("rv_dropbox_tokens").update({
-        "used_at": datetime.now(timezone.utc).isoformat(),
-        "federal_owed": federal_owed,
-        "state_owed": state_owed,
-        "local_owed": local_owed,
-        "uploaded_files": uploaded_files,
-        "federal_link": federal_link,
-        "state_link": state_link,
-    }).eq("id", row["id"]).execute()
-
-    await _notify_owner(business, federal_owed, state_owed, local_owed, federal_link, state_link, len(uploaded_files))
-
-    return {"ok": True}
+        return {"ok": True}
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"message": e.detail})
 
 
 async def _notify_owner(business: dict, federal_owed: float, state_owed: float, local_owed: float,
@@ -225,9 +231,47 @@ async def _notify_owner(business: dict, federal_owed: float, state_owed: float, 
             print(f"[dropbox] owner email failed: {e}")
 
 
-# ── Feedback (optional, never blocking) ─────────────────────────────────────
+# ── Tax Payments (owner-facing — what the accountant last submitted) ───────
+
+@tax_payments_routes.get("/tax-payments")
+async def get_tax_payments(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    business = resolve_module_access(supabase, current_user.user.id, "money_box")
+
+    def empty_row():
+        return {"amount": 0.0, "paymentLink": None}
+
+    latest = (
+        supabase.table("rv_dropbox_tokens")
+        .select("*")
+        .eq("business_id", business["id"])
+        .not_.is_("used_at", "null")
+        .order("used_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+
+    if not latest.data:
+        return {"federal": empty_row(), "state": empty_row(), "local": empty_row()}
+
+    row = latest.data[0]
+    return {
+        "federal": {"amount": float(row.get("federal_owed") or 0), "paymentLink": row.get("federal_link")},
+        "state": {"amount": float(row.get("state_owed") or 0), "paymentLink": row.get("state_link")},
+        # No maintained local payment-link table — local jurisdictions vary
+        # too much to keep a single canonical URL, so this stays null.
+        "local": {"amount": float(row.get("local_owed") or 0), "paymentLink": None},
+    }
+
+
+# ── Feedback (optional, never blocking — including for expired-trial users) ─
+# NOT gated behind require_active_subscription: one of its documented
+# contexts is "trial_expired_no_conversion", which by definition comes from
+# a user whose trial has already ended. Blocking it on subscription status
+# would silence exactly the feedback it exists to capture.
 
 class FeedbackBody(BaseModel):
+    context: str  # e.g. "tax_payments_received" | "trial_expired_no_conversion"
     message: str
 
 
@@ -242,6 +286,7 @@ async def submit_feedback(body: FeedbackBody, current_user=Depends(get_current_u
         supabase.table("rv_feedback").insert({
             "business_id": business["id"] if business else None,
             "user_id": current_user.user.id,
+            "context": body.context,
             "message": message,
         }).execute()
     except Exception as e:
