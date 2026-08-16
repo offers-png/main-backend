@@ -773,10 +773,9 @@ async def resend_all(current_user=Depends(get_current_user)):
     if not business.get("accountant_email"):
         raise HTTPException(status_code=400, detail="No accountant email configured")
 
-    # Mark ALL receipts as unsent
-    supabase.table("receipts").update({"sent_at": None}).eq("business_id", business["id"]).execute()
+    # Clear sent_at AND any stale error on ALL receipts (this is a resend)
+    supabase.table("receipts").update({"sent_at": None, "send_error": None}).eq("business_id", business["id"]).execute()
 
-    # Now call send_now logic
     all_receipts = (
         supabase.table("receipts")
         .select("*")
@@ -788,13 +787,10 @@ async def resend_all(current_user=Depends(get_current_user)):
 
     receipts = [to_receipt(r) for r in all_receipts.data]
     sent_count = len(receipts)
-
-    from datetime import datetime, timezone
-    sent_at = datetime.now(timezone.utc).isoformat()
-    for r in all_receipts.data:
-        supabase.table("receipts").update({"sent_at": sent_at}).eq("id", r["id"]).execute()
+    receipt_ids = [r["id"] for r in all_receipts.data]
 
     async def send_in_background():
+        from datetime import datetime, timezone
         try:
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
@@ -825,7 +821,7 @@ async def resend_all(current_user=Depends(get_current_user)):
             excel_filename = f"ReceiptVault_{safe_name}_{month_str}_RESEND.xlsx"
 
             async with httpx.AsyncClient(timeout=120.0) as client:
-                await client.post(
+                resp = await client.post(
                     "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
                     json={
                         "businessId": business["id"],
@@ -838,12 +834,25 @@ async def resend_all(current_user=Depends(get_current_user)):
                         "excelFilename": excel_filename,
                     },
                 )
+
+            if resp.status_code == 200:
+                sent_at = datetime.now(timezone.utc).isoformat()
+                for rid in receipt_ids:
+                    supabase.table("receipts").update({"sent_at": sent_at, "send_error": None}).eq("id", rid).execute()
+            else:
+                err_msg = f"Email failed ({resp.status_code}): {resp.text[:500]}"
+                print(f"Resend-all send failed: {err_msg}")
+                for rid in receipt_ids:
+                    supabase.table("receipts").update({"send_error": err_msg}).eq("id", rid).execute()
         except Exception as e:
-            print(f"Background resend error: {e}")
+            err_msg = f"Send error: {e}"
+            print(f"Background resend error: {err_msg}")
+            for rid in receipt_ids:
+                supabase.table("receipts").update({"send_error": err_msg}).eq("id", rid).execute()
 
     import asyncio
     asyncio.create_task(send_in_background())
-    return {"ok": True, "sent": sent_count}
+    return {"ok": True, "sent": sent_count, "status": "sending"}
 
 @receipt_routes.post("/send-now", dependencies=[Depends(require_active_subscription)])
 async def send_now(current_user=Depends(get_current_user)):
@@ -872,15 +881,15 @@ async def send_now(current_user=Depends(get_current_user)):
 
     receipts = [to_receipt(r) for r in unsent.data]
     sent_count = len(receipts)
+    receipt_ids = [r["id"] for r in unsent.data]
 
-    # Mark all as sent immediately so UI updates fast
-    from datetime import datetime, timezone
-    sent_at = datetime.now(timezone.utc).isoformat()
-    for r in unsent.data:
-        supabase.table("receipts").update({"sent_at": sent_at}).eq("id", r["id"]).execute()
+    # Clear any stale error before retrying
+    for rid in receipt_ids:
+        supabase.table("receipts").update({"send_error": None}).eq("id", rid).execute()
 
     # Fire PDF generation + email in background — don't wait for it
     async def send_in_background():
+        from datetime import datetime, timezone
         try:
             from pdf_generator import generate_cover_pdf
             from excel_generator import build_excel
@@ -911,7 +920,7 @@ async def send_now(current_user=Depends(get_current_user)):
             excel_filename = f"ReceiptVault_{safe_name}_{month_str}.xlsx"
 
             async with httpx.AsyncClient(timeout=120.0) as client:
-                await client.post(
+                resp = await client.post(
                     "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
                     json={
                         "businessId": business["id"],
@@ -924,6 +933,17 @@ async def send_now(current_user=Depends(get_current_user)):
                         "excelFilename": excel_filename,
                     },
                 )
+
+            if resp.status_code != 200:
+                err_msg = f"Email failed ({resp.status_code}): {resp.text[:500]}"
+                print(f"send_now send failed: {err_msg}")
+                for rid in receipt_ids:
+                    supabase.table("receipts").update({"send_error": err_msg}).eq("id", rid).execute()
+                return  # don't mark sent, don't SMS
+
+            sent_at = datetime.now(timezone.utc).isoformat()
+            for rid in receipt_ids:
+                supabase.table("receipts").update({"sent_at": sent_at, "send_error": None}).eq("id", rid).execute()
 
             # SMS notify owner
             owner_phone = business.get("owner_phone", "")
@@ -942,9 +962,12 @@ async def send_now(current_user=Depends(get_current_user)):
                         json={"from": "+13156252025", "to": owner_phone, "text": sms_body},
                     )
         except Exception as e:
-            print(f"Background send error: {e}")
+            err_msg = f"Send error: {e}"
+            print(f"Background send error: {err_msg}")
+            for rid in receipt_ids:
+                supabase.table("receipts").update({"send_error": err_msg}).eq("id", rid).execute()
 
     asyncio.create_task(send_in_background())
 
     # Return immediately — email sends in background
-    return {"ok": True, "sent": sent_count}
+    return {"ok": True, "sent": sent_count, "status": "sending"}
