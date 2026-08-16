@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from scheduler import run_scheduled_sends
+from routes.receiptvault.trial_emails import check_trial_reminder_emails
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.routes import receipt_routes, require_active_subscription
 from routes.receiptvault.invoice_routes import invoice_routes
@@ -13,6 +14,8 @@ from routes.receiptvault.mileage_routes import mileage_routes
 from routes.receiptvault.team_routes import team_routes
 from routes.receiptvault.billing_routes import billing_routes
 from routes.receiptvault.money_routes import money_routes
+from routes.receiptvault.pnl_routes import pnl_routes
+from routes.receiptvault.dropbox_routes import dropbox_routes, tax_payments_routes, feedback_routes
 from routes.checkout.routes import checkout_routes, stripe_webhook
 from routes.competitor.routes import competitor_routes
 from routes.mobile.routes import mobile_routes
@@ -30,6 +33,9 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
     # Run every hour — checks send_day/send_frequency for each business
     scheduler.add_job(run_scheduled_sends, IntervalTrigger(hours=1), id="rv_scheduler", replace_existing=True)
+    # Run every hour — checks trial_ends_at for each business and fires the
+    # day-5/day-7 churn emails once per business (guarded by sent_at flags)
+    scheduler.add_job(check_trial_reminder_emails, IntervalTrigger(hours=1), id="rv_trial_emails", replace_existing=True)
     scheduler.start()
     print("[startup] ReceiptVault scheduler started — runs every hour")
     yield
@@ -65,6 +71,13 @@ app.include_router(mileage_routes, dependencies=[Depends(require_active_subscrip
 app.include_router(team_routes, dependencies=[Depends(require_active_subscription)])
 app.include_router(billing_routes)
 app.include_router(money_routes, dependencies=[Depends(require_active_subscription)])
+app.include_router(pnl_routes, dependencies=[Depends(require_active_subscription)])
+app.include_router(dropbox_routes)
+app.include_router(tax_payments_routes, dependencies=[Depends(require_active_subscription)])
+# Feedback is deliberately NOT gated on subscription status — one of its
+# documented contexts is "trial_expired_no_conversion", submitted by users
+# whose trial has already ended.
+app.include_router(feedback_routes)
 app.include_router(checkout_routes, prefix="/api/checkout")
 app.include_router(competitor_routes, prefix="/api/competitor")
 app.include_router(mobile_routes, prefix="/api/mobile")

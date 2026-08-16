@@ -31,6 +31,28 @@ _supabase_client = None
 
 CATEGORIES = ["Inventory", "Meals & Entertainment", "Travel", "Office Supplies", "Utilities", "Software & Subscriptions", "Advertising", "Vehicle & Fuel", "Equipment", "Other"]
 
+# IRS Schedule C expense lines this product maps every receipt to, for the
+# self-employed owner's tax prep. Deliberately a small, real-world subset of
+# the full Schedule C line list — the ones a convenience-store-style small
+# business actually hits.
+SCHEDULE_C_LINES = ["Advertising", "Car/Truck", "Rent", "Supplies", "Meals", "Utilities", "Other"]
+
+# Best-effort fallback mapping from the general CATEGORIES taxonomy to a
+# Schedule C line, used only when OCR doesn't return schedule_c_line directly
+# (e.g. on older re-extractions or if the model omits the field).
+CATEGORY_TO_SCHEDULE_C_LINE = {
+    "Inventory": "Supplies",
+    "Meals & Entertainment": "Meals",
+    "Travel": "Car/Truck",
+    "Office Supplies": "Supplies",
+    "Utilities": "Utilities",
+    "Software & Subscriptions": "Other",
+    "Advertising": "Advertising",
+    "Vehicle & Fuel": "Car/Truck",
+    "Equipment": "Supplies",
+    "Other": "Other",
+}
+
 def get_supabase() -> Client:
     global _supabase_client
     if _supabase_client is None:
@@ -148,6 +170,7 @@ def to_business(row: dict, referral_count: int = 0) -> dict:
         "businessAddress": row.get("business_address"),
         "ownerName": row.get("owner_name"),
         "ownerAddress": row.get("owner_address"),
+        "state": row.get("state"),
         "accountantEmail": row.get("accountant_email"),
         "sendFrequency": row.get("send_frequency"),
         "sendDay": row.get("send_day"),
@@ -171,6 +194,7 @@ def to_receipt(row: dict) -> dict:
         "amount": row.get("amount"),
         "receiptDate": row.get("receipt_date"),
         "category": row.get("category"),
+        "scheduleCLine": row.get("schedule_c_line"),
         "notes": row.get("notes"),
         "uploadedAt": str(row.get("uploaded_at", "")),
         "sentAt": str(row.get("sent_at")) if row.get("sent_at") else None,
@@ -222,7 +246,8 @@ Extract the following from this receipt/invoice image and return ONLY valid JSON
   "merchant": "name of the company SELLING the goods (the vendor/supplier, NOT the buyer)",
   "amount": 12.99,
   "receipt_date": "YYYY-MM-DD",
-  "category": "one of: {', '.join(CATEGORIES)}"
+  "category": "one of: {', '.join(CATEGORIES)}",
+  "schedule_c_line": "one of: {', '.join(SCHEDULE_C_LINES)}"
 }}
 
 CRITICAL RULES:
@@ -233,9 +258,17 @@ CRITICAL RULES:
 - receipt_date = YYYY-MM-DD format, or null
 - category must be exactly one of the provided options
 - For beverage distributors, food suppliers, dairy: use "Inventory"
-- For restaurant supply stores: use "Inventory"  
+- For restaurant supply stores: use "Inventory"
 - For office/store supplies (bags, cups, t-shirts): use "Office Supplies"
 - For gas/fuel: use "Vehicle & Fuel"
+- schedule_c_line is this receipt's IRS Schedule C expense line, for the owner's tax filing:
+  - "Advertising" = marketing, signage, promo materials
+  - "Car/Truck" = fuel, vehicle maintenance, delivery mileage-related purchases
+  - "Rent" = rent or lease payments for the business location or equipment
+  - "Supplies" = inventory, store/office supplies, equipment, consumables
+  - "Meals" = business meals and entertainment
+  - "Utilities" = electric, gas, water, phone, internet
+  - "Other" = anything that doesn't fit the above
 - If you cannot find a value, use null
 - Return ONLY the JSON object, no explanation, no markdown"""
 
@@ -280,6 +313,8 @@ CRITICAL RULES:
             if text.startswith("json"):
                 text = text[4:]
         parsed = json.loads(text.strip())
+        if parsed.get("schedule_c_line") not in SCHEDULE_C_LINES:
+            parsed["schedule_c_line"] = CATEGORY_TO_SCHEDULE_C_LINE.get(parsed.get("category"), "Other")
         return parsed
     except Exception as ocr_err:
         print(f"OCR error: {ocr_err}")
@@ -361,6 +396,7 @@ class BusinessProfileBody(BaseModel):
     ownerName: str
     ownerAddress: Optional[str] = None
     taxId: Optional[str] = None
+    state: Optional[str] = None
     weekStartDay: Optional[int] = None
     referralCode: Optional[str] = None
 
@@ -452,6 +488,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
+        if body.state is not None:
+            data["state"] = body.state.strip().upper()[:2] or None
         if body.weekStartDay is not None:
             data["week_start_day"] = body.weekStartDay
         result = supabase.table("businesses").update(data).eq("id", owned.data[0]["id"]).execute()
@@ -479,11 +517,14 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             "business_address": body.businessAddress,
             "owner_name": body.ownerName,
             "owner_address": body.ownerAddress,
+            "owner_email": current_user.user.email,
             "trial_ends_at": (datetime.utcnow() + timedelta(days=trial_days)).isoformat(),
             "referral_code": generate_referral_code(supabase),
         }
         if body.taxId is not None:
             data["tax_id"] = body.taxId
+        if body.state is not None:
+            data["state"] = body.state.strip().upper()[:2] or None
         if body.weekStartDay is not None:
             data["week_start_day"] = body.weekStartDay
 
@@ -621,6 +662,8 @@ async def reextract_receipt(receipt_id: str, current_user=Depends(get_current_us
         update_data["receipt_date"] = ocr_data["receipt_date"]
     if not row.get("category") and ocr_data.get("category"):
         update_data["category"] = ocr_data["category"]
+    if not row.get("schedule_c_line") and ocr_data.get("schedule_c_line"):
+        update_data["schedule_c_line"] = ocr_data["schedule_c_line"]
 
     if update_data:
         updated = supabase.table("receipts").update(update_data).eq("id", receipt_id).execute()
@@ -633,6 +676,7 @@ class UpdateReceiptBody(BaseModel):
     amount: Optional[float] = None
     receiptDate: Optional[str] = None
     category: Optional[str] = None
+    scheduleCLine: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -652,6 +696,10 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
         update_data["receipt_date"] = body.receiptDate
     if body.category is not None:
         update_data["category"] = body.category
+    if body.scheduleCLine is not None:
+        if body.scheduleCLine not in SCHEDULE_C_LINES:
+            raise HTTPException(status_code=400, detail=f"scheduleCLine must be one of: {', '.join(SCHEDULE_C_LINES)}")
+        update_data["schedule_c_line"] = body.scheduleCLine
     if body.notes is not None:
         update_data["notes"] = body.notes
 
@@ -739,6 +787,8 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
         insert_payload["receipt_date"] = ocr_data["receipt_date"]
     if ocr_data.get("category"):
         insert_payload["category"] = ocr_data["category"]
+    if ocr_data.get("schedule_c_line"):
+        insert_payload["schedule_c_line"] = ocr_data["schedule_c_line"]
 
     receipt = supabase.table("receipts").insert(insert_payload).execute()
     if not receipt.data:
