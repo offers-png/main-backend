@@ -264,15 +264,14 @@ async def get_tax_payments(current_user=Depends(get_current_user)):
     )
 
     if not latest.data:
-        return {"federal": empty_row(), "state": empty_row(), "local": empty_row()}
+        return {"federal": empty_row(), "state": empty_row(), "document": None}
 
     row = latest.data[0]
+    uploaded_files = row.get("uploaded_files") or []
     return {
         "federal": {"amount": float(row.get("federal_owed") or 0), "paymentLink": row.get("federal_link")},
         "state": {"amount": float(row.get("state_owed") or 0), "paymentLink": row.get("state_link")},
-        # No maintained local payment-link table — local jurisdictions vary
-        # too much to keep a single canonical URL, so this stays null.
-        "local": {"amount": float(row.get("local_owed") or 0), "paymentLink": None},
+        "document": uploaded_files[0] if uploaded_files else None,   # { "name": ..., "path": ... }
     }
 
 
