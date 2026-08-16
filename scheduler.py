@@ -108,6 +108,7 @@ async def send_for_business(business: dict):
         from pdf_generator import generate_cover_pdf
         from excel_generator import build_excel
         from routes.receiptvault.money_routes import sum_ledger_income
+        from routes.receiptvault.dropbox_routes import create_dropbox_token
 
         month_str    = datetime.now().strftime("%Y-%m")
         period_label = datetime.now().strftime("%B %Y") + " Expenses"
@@ -116,6 +117,13 @@ async def send_for_business(business: dict):
         month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
         today_str = datetime.now().strftime("%Y-%m-%d")
         gross_income = sum_ledger_income(supabase, biz_id, month_start, today_str)
+
+        dropbox_url = None
+        try:
+            dropbox_token = create_dropbox_token(supabase, biz_id, created_by="system:scheduler", label="Monthly export")
+            dropbox_url = dropbox_token["url"]
+        except Exception as dropbox_err:
+            print(f"[scheduler] {biz_name}: dropbox token creation failed — sending without one: {dropbox_err}")
 
         pdf_bytes = await generate_cover_pdf(
             business_name=biz_name,
@@ -140,6 +148,7 @@ async def send_for_business(business: dict):
             "pdfFilename":    f"ReceiptVault_{safe_name}_{month_str}.pdf",
             "excelBase64":    b64lib.b64encode(excel_bytes).decode(),
             "excelFilename":  f"ReceiptVault_{safe_name}_{month_str}.xlsx",
+            "dropboxUrl":     dropbox_url,
         }
 
         async with httpx.AsyncClient(timeout=120.0) as client:

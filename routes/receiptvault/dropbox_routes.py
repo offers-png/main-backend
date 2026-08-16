@@ -57,9 +57,35 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# ── Generate (owner-facing, authenticated) ──────────────────────────────────
-# NOTE: registered before the "/{token}" route below so a POST here never
-# gets swallowed by the dynamic token route.
+# ── Generate (owner-facing, authenticated, and reused internally by the
+# accountant-email senders — resend_all/send_now in routes.py and the
+# scheduler's send_for_business — so every email that goes out carries a
+# dropbox link generated exactly the same way) ──────────────────────────────
+# NOTE: the /generate route is registered before the "/{token}" route below
+# so a POST there never gets swallowed by the dynamic token route.
+
+def create_dropbox_token(supabase, business_id: str, created_by: Optional[str] = None, label: Optional[str] = None) -> dict:
+    """Single-use dropbox token creation, shared by the owner-facing
+    /generate endpoint and every place an accountant email gets sent."""
+    token = secrets.token_urlsafe(24)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)).isoformat()
+
+    result = supabase.table("rv_dropbox_tokens").insert({
+        "business_id": business_id,
+        "token": token,
+        "created_by": created_by,
+        "expires_at": expires_at,
+        "label": label,
+    }).execute()
+    if not result.data:
+        raise RuntimeError("Failed to create dropbox link")
+
+    return {
+        "token": token,
+        "url": f"{FRONTEND_URL}/dropbox/{token}",
+        "expiresAt": expires_at,
+    }
+
 
 class GenerateDropboxBody(BaseModel):
     label: Optional[str] = None
@@ -74,24 +100,10 @@ async def generate_dropbox_link(body: GenerateDropboxBody, current_user=Depends(
     if role not in ("owner", "bookkeeper"):
         raise HTTPException(status_code=403, detail="Only the owner or bookkeeper can generate a dropbox link")
 
-    token = secrets.token_urlsafe(24)
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)).isoformat()
-
-    result = supabase.table("rv_dropbox_tokens").insert({
-        "business_id": business["id"],
-        "token": token,
-        "created_by": current_user.user.id,
-        "expires_at": expires_at,
-        "label": body.label,
-    }).execute()
-    if not result.data:
+    try:
+        return create_dropbox_token(supabase, business["id"], current_user.user.id, body.label)
+    except RuntimeError:
         raise HTTPException(status_code=500, detail="Failed to create dropbox link")
-
-    return {
-        "token": token,
-        "url": f"{FRONTEND_URL}/dropbox/{token}",
-        "expiresAt": expires_at,
-    }
 
 
 # ── Submit (accountant-facing, public, single use) ──────────────────────────
