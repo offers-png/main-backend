@@ -559,12 +559,7 @@ async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     return {"ok": True, "invoiceNumber": invoice["invoiceNumber"], "sentTo": invoice_row["customer_email"]}
 
 
-@invoice_routes.post("/invoices/{invoice_id}/toggle-paid")
-async def toggle_invoice_paid(invoice_id: str, current_user=Depends(get_current_user)):
-    """Flips an invoice between Paid and not-Paid. Marking paid sets
-    paid_at; un-marking clears it and falls back to "sent" (if it was ever
-    sent) or "draft" (if it wasn't) rather than inventing a new status."""
-    supabase = get_supabase()
+def _load_invoice_for_business(supabase, invoice_id: str, current_user):
     biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
     if not biz.data:
         raise HTTPException(status_code=404, detail="Not found")
@@ -574,20 +569,11 @@ async def toggle_invoice_paid(invoice_id: str, current_user=Depends(get_current_
         .eq("business_id", business_id).execute()
     if not row.data:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    invoice_row = row.data[0]
+    return business_id, row.data[0]
 
-    if invoice_row.get("status") == "paid":
-        update_data = {
-            "status": "sent" if invoice_row.get("sent_at") else "draft",
-            "paid_at": None,
-        }
-    else:
-        update_data = {
-            "status": "paid",
-            "paid_at": datetime.utcnow().isoformat(),
-        }
+
+def _apply_invoice_update_and_return(supabase, invoice_id: str, business_id: str, update_data: dict):
     update_data["updated_at"] = datetime.utcnow().isoformat()
-
     supabase.table("invoices").update(update_data).eq("id", invoice_id)\
         .eq("business_id", business_id).execute()
 
@@ -595,3 +581,26 @@ async def toggle_invoice_paid(invoice_id: str, current_user=Depends(get_current_
     items = supabase.table("invoice_items").select("*").eq("invoice_id", invoice_id)\
         .order("sort_order").execute()
     return to_invoice(updated.data[0], items.data or [])
+
+
+@invoice_routes.post("/invoices/{invoice_id}/mark-paid")
+async def mark_invoice_paid(invoice_id: str, current_user=Depends(get_current_user)):
+    """Explicit Paid state: sets status='paid' and stamps paid_at."""
+    supabase = get_supabase()
+    business_id, _invoice_row = _load_invoice_for_business(supabase, invoice_id, current_user)
+    update_data = {"status": "paid", "paid_at": datetime.utcnow().isoformat()}
+    return _apply_invoice_update_and_return(supabase, invoice_id, business_id, update_data)
+
+
+@invoice_routes.post("/invoices/{invoice_id}/mark-unpaid")
+async def mark_invoice_unpaid(invoice_id: str, current_user=Depends(get_current_user)):
+    """Explicit not-Paid state: clears paid_at and falls back to "sent"
+    (if the invoice was ever sent) or "draft" (if it wasn't) rather than
+    inventing a dedicated "unpaid" status value."""
+    supabase = get_supabase()
+    business_id, invoice_row = _load_invoice_for_business(supabase, invoice_id, current_user)
+    update_data = {
+        "status": "sent" if invoice_row.get("sent_at") else "draft",
+        "paid_at": None,
+    }
+    return _apply_invoice_update_and_return(supabase, invoice_id, business_id, update_data)
