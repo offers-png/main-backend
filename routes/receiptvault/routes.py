@@ -181,6 +181,10 @@ def to_business(row: dict, referral_count: int = 0) -> dict:
         "createdAt": str(row.get("created_at", "")),
         "referralCode": row.get("referral_code"),
         "referralCount": referral_count,
+        "zelleContact": row.get("zelle_contact"),
+        "cashappTag": row.get("cashapp_tag"),
+        "paypalLink": row.get("paypal_link"),
+        "chimeTag": row.get("chime_tag"),
     }
 
 
@@ -424,6 +428,10 @@ class BusinessProfileBody(BaseModel):
     state: Optional[str] = None
     weekStartDay: Optional[int] = None
     referralCode: Optional[str] = None
+    zelleContact: Optional[str] = None
+    cashappTag: Optional[str] = None
+    paypalLink: Optional[str] = None
+    chimeTag: Optional[str] = None
 
 
 def generate_referral_code(supabase) -> str:
@@ -517,6 +525,14 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             data["state"] = body.state.strip().upper()[:2] or None
         if body.weekStartDay is not None:
             data["week_start_day"] = body.weekStartDay
+        if body.zelleContact is not None:
+            data["zelle_contact"] = body.zelleContact or None
+        if body.cashappTag is not None:
+            data["cashapp_tag"] = body.cashappTag or None
+        if body.paypalLink is not None:
+            data["paypal_link"] = body.paypalLink or None
+        if body.chimeTag is not None:
+            data["chime_tag"] = body.chimeTag or None
         result = supabase.table("businesses").update(data).eq("id", owned.data[0]["id"]).execute()
     else:
         # Not an owner. If they're already a team member somewhere, they don't
@@ -552,6 +568,14 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             data["state"] = body.state.strip().upper()[:2] or None
         if body.weekStartDay is not None:
             data["week_start_day"] = body.weekStartDay
+        if body.zelleContact is not None:
+            data["zelle_contact"] = body.zelleContact or None
+        if body.cashappTag is not None:
+            data["cashapp_tag"] = body.cashappTag or None
+        if body.paypalLink is not None:
+            data["paypal_link"] = body.paypalLink or None
+        if body.chimeTag is not None:
+            data["chime_tag"] = body.chimeTag or None
 
         # If they signed up via someone's referral link, validate the code
         # and reward the referrer — never the new signup. Silently ignore

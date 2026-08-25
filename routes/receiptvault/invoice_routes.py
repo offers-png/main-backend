@@ -141,6 +141,20 @@ def compute_totals(items: List[InvoiceItem], tax_rate: float):
     return round(subtotal, 2), tax_amount, total
 
 
+def payment_options(business: dict) -> List[tuple]:
+    """(label, value) pairs for each payment method the sender has filled
+    in on their profile. Empty/unset methods are omitted entirely — this
+    is the single source of truth for whether the "Ways to Pay" section
+    renders at all, in both the PDF and the email."""
+    fields = [
+        ("Zelle", business.get("zelle_contact")),
+        ("Cash App", business.get("cashapp_tag")),
+        ("PayPal", business.get("paypal_link")),
+        ("Chime", business.get("chime_tag")),
+    ]
+    return [(label, value) for label, value in fields if value]
+
+
 # ── Invoice PDF Generator ────────────────────────────────────────────────────
 
 def generate_invoice_pdf(invoice: dict, business: dict) -> bytes:
@@ -260,6 +274,25 @@ def generate_invoice_pdf(invoice: dict, business: dict) -> bytes:
     ]))
     story.append(items_table)
     story.append(Spacer(1, 0.2*inch))
+
+    # ── Ways to Pay ───────────────────────────────────────────────────────────
+    pay_methods = payment_options(business)
+    if pay_methods:
+        ways_data = [[Paragraph('<b>WAYS TO PAY</b>', ParagraphStyle("waysHeader", parent=styles["Normal"], fontSize=10, textColor=GREEN))]]
+        for label, value in pay_methods:
+            ways_data.append([Paragraph(f'<b>{label}:</b> {value}', ParagraphStyle("waysRow", parent=styles["Normal"], fontSize=10, textColor=INK))])
+        ways_table = Table(ways_data, colWidths=[6.5*inch])
+        ways_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), GREEN_LIGHT),
+            ("ROUNDEDCORNERS", [6, 6, 6, 6]),
+            ("PADDING", (0, 0), (-1, 0), 10),
+            ("TOPPADDING", (0, 1), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ]))
+        story.append(ways_table)
+        story.append(Spacer(1, 0.2*inch))
 
     # ── Notes ─────────────────────────────────────────────────────────────────
     if invoice.get("notes"):
@@ -461,6 +494,25 @@ async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
         f'<tr style="background:{"white" if i%2==0 else "#e8f4ec"}"><td style="padding:8px 12px">{item["description"]}</td><td style="padding:8px 12px;text-align:right">${item["amount"]:.2f}</td></tr>'
         for i, item in enumerate(invoice["items"])
     )
+    # Subtotal always shown; tax line only when a rate is actually applied —
+    # matches the PDF, which already breaks this out (BUG: the email used to
+    # jump straight from line items to Total with no visible math).
+    tax_row_html = ""
+    if invoice.get("taxRate", 0) > 0:
+        tax_row_html = f'<tr><td style="padding:8px 12px;text-align:right;color:#5c5c58">Tax ({invoice["taxRate"]}%)</td><td style="padding:8px 12px;text-align:right;color:#5c5c58">${invoice["taxAmount"]:.2f}</td></tr>'
+    totals_html = f"""<tr><td style="padding:8px 12px;text-align:right;color:#5c5c58">Subtotal</td><td style="padding:8px 12px;text-align:right;color:#5c5c58">${invoice['subtotal']:.2f}</td></tr>
+          {tax_row_html}
+          <tr><td style="padding:8px 12px;text-align:right;color:#5c5c58">Total</td><td style="padding:8px 12px;text-align:right;font-weight:bold;color:#1a6b3a;font-size:16px">${invoice['total']:.2f}</td></tr>"""
+
+    pay_methods = payment_options(business)
+    ways_to_pay_html = ""
+    if pay_methods:
+        pay_rows = "".join(f'<p style="margin:4px 0;color:#2c2c2a"><b>{label}:</b> {value}</p>' for label, value in pay_methods)
+        ways_to_pay_html = f"""<div style="background:#e8f4ec;border-radius:8px;padding:16px 20px;margin:16px 0">
+          <p style="margin:0 0 8px;color:#1a6b3a;font-weight:bold;font-size:13px;text-transform:uppercase;letter-spacing:0.5px">Ways to Pay</p>
+          {pay_rows}
+        </div>"""
+
     html = f"""<div style="font-family:sans-serif;max-width:600px;margin:0 auto">
       <div style="background:#1a6b3a;padding:24px 32px;border-radius:12px 12px 0 0">
         <h1 style="color:white;margin:0;font-size:22px">Invoice {invoice['invoiceNumber']}</h1>
@@ -472,8 +524,9 @@ async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
         <table style="width:100%;border-collapse:collapse;margin:16px 0">
           <tr style="background:#1a6b3a;color:white"><th style="padding:8px 12px;text-align:left">Description</th><th style="padding:8px 12px;text-align:right">Amount</th></tr>
           {items_html}
-          <tr><td style="padding:8px 12px;text-align:right;color:#5c5c58">Total</td><td style="padding:8px 12px;text-align:right;font-weight:bold;color:#1a6b3a;font-size:16px">${invoice['total']:.2f}</td></tr>
+          {totals_html}
         </table>
+        {ways_to_pay_html}
         {"<p style='color:#5c5c58'><b>Due Date:</b> " + str(invoice.get('dueDate','')) + "</p>" if invoice.get('dueDate') else ""}
         {"<p style='color:#5c5c58'><b>Notes:</b> " + str(invoice.get('notes','')) + "</p>" if invoice.get('notes') else ""}
         <p style="color:#9c9c96;font-size:12px;margin-top:24px">Generated by ReceiptVault · receipts.dealdily.com</p>
@@ -504,3 +557,41 @@ async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     }).eq("id", invoice_id).execute()
 
     return {"ok": True, "invoiceNumber": invoice["invoiceNumber"], "sentTo": invoice_row["customer_email"]}
+
+
+@invoice_routes.post("/invoices/{invoice_id}/toggle-paid")
+async def toggle_invoice_paid(invoice_id: str, current_user=Depends(get_current_user)):
+    """Flips an invoice between Paid and not-Paid. Marking paid sets
+    paid_at; un-marking clears it and falls back to "sent" (if it was ever
+    sent) or "draft" (if it wasn't) rather than inventing a new status."""
+    supabase = get_supabase()
+    biz = type("BizR", (), {"data": ([{"id": _b["id"]}] if (_b := get_business_for_user(supabase, current_user.user.id)) else [])})()
+    if not biz.data:
+        raise HTTPException(status_code=404, detail="Not found")
+    business_id = biz.data[0]["id"]
+
+    row = supabase.table("invoices").select("*").eq("id", invoice_id)\
+        .eq("business_id", business_id).execute()
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    invoice_row = row.data[0]
+
+    if invoice_row.get("status") == "paid":
+        update_data = {
+            "status": "sent" if invoice_row.get("sent_at") else "draft",
+            "paid_at": None,
+        }
+    else:
+        update_data = {
+            "status": "paid",
+            "paid_at": datetime.utcnow().isoformat(),
+        }
+    update_data["updated_at"] = datetime.utcnow().isoformat()
+
+    supabase.table("invoices").update(update_data).eq("id", invoice_id)\
+        .eq("business_id", business_id).execute()
+
+    updated = supabase.table("invoices").select("*").eq("id", invoice_id).execute()
+    items = supabase.table("invoice_items").select("*").eq("invoice_id", invoice_id)\
+        .order("sort_order").execute()
+    return to_invoice(updated.data[0], items.data or [])
