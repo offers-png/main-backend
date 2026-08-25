@@ -686,6 +686,35 @@ async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_
     return to_business(result.data[0])
 
 
+class PaymentOptionsBody(BaseModel):
+    zelle: Optional[str] = None
+    cashApp: Optional[str] = None
+    paypal: Optional[str] = None
+    chime: Optional[str] = None
+
+
+@receipt_routes.post("/settings/payment-options")
+async def save_payment_options(body: PaymentOptionsBody, current_user=Depends(get_current_user)):
+    """Matches the frontend's POST /api/settings/payment-options exactly —
+    that route didn't exist here before (only /api/setup/business accepted
+    these fields), which is why saving from the Settings page 404'd."""
+    supabase = get_supabase()
+    owned = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
+    if not owned.data:
+        raise HTTPException(status_code=404, detail="Business not found")
+    business_id = owned.data[0]["id"]
+    data = {
+        "zelle_contact": body.zelle or None,
+        "cashapp_tag": body.cashApp or None,
+        "paypal_link": body.paypal or None,
+        "chime_tag": body.chime or None,
+    }
+    result = supabase.table("businesses").update(data).eq("id", business_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to save payment options")
+    return to_business(result.data[0])
+
+
 @receipt_routes.get("/receipts", dependencies=[Depends(require_active_subscription)])
 async def list_receipts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
