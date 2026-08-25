@@ -267,11 +267,19 @@ async def get_tax_payments(current_user=Depends(get_current_user)):
         return {"federal": empty_row(), "state": empty_row(), "document": None}
 
     row = latest.data[0]
+    # Local dropped entirely, not just hidden: in NY, local/county sales tax
+    # is remitted together with state sales tax through the same filing —
+    # there is no separate "local" payment step for a business to take here,
+    # so showing a line for it (even disabled) would promise something that
+    # doesn't exist as its own action. Local income-type levies are rare and
+    # property tax is a landlord/owner-of-record matter, not a tenant
+    # business's income-tax payment flow, so neither belongs on this screen.
     uploaded_files = row.get("uploaded_files") or []
+    document = {"path": uploaded_files[0]["path"]} if uploaded_files else None
     return {
         "federal": {"amount": float(row.get("federal_owed") or 0), "paymentLink": row.get("federal_link")},
         "state": {"amount": float(row.get("state_owed") or 0), "paymentLink": row.get("state_link")},
-        "document": uploaded_files[0] if uploaded_files else None,   # { "name": ..., "path": ... }
+        "document": document,
     }
 
 
