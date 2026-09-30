@@ -152,7 +152,7 @@ async def send_for_business(business: dict):
         }
 
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(EDGE_URL, json=payload)
+            resp = await client.post(EDGE_URL, json=payload, headers={"X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")})
             resp.raise_for_status()
 
         print(f"[scheduler] {biz_name}: sent {len(receipts)} receipts ✓")

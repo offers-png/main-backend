@@ -1016,6 +1016,7 @@ async def resend_all(current_user=Depends(get_current_user)):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
                     "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
+                    headers={"X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
                     json={
                         "businessId": business["id"],
                         "accountantEmail": business["accountant_email"],
@@ -1128,6 +1129,7 @@ async def send_now(current_user=Depends(get_current_user)):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(
                     "https://wzcuzyouymauokijaqjk.supabase.co/functions/v1/send-receipts",
+                    headers={"X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
                     json={
                         "businessId": business["id"],
                         "accountantEmail": business["accountant_email"],
