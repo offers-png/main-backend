@@ -9,7 +9,30 @@ from routes.receiptvault.routes import get_current_user, resolve_module_access
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
 
-IRS_RATE = 0.70  # 2026 IRS rate
+# IRS business standard mileage rate by the date the trip was driven.
+# Keep in sync with the public.irs_mileage_rate() database function.
+# 2026 changed mid-year: 72.5c Jan 1-Jun 30, 76c from Jul 1.
+IRS_RATES = [  # (effective from, dollars per mile), newest first
+    (date(2026, 7, 1), 0.76),
+    (date(2026, 1, 1), 0.725),
+    (date(2025, 1, 1), 0.70),
+    (date(2024, 1, 1), 0.67),
+]
+
+
+def irs_rate(d=None):
+    """IRS rate for a trip date (date or 'YYYY-MM-DD'); defaults to today."""
+    if d is None or d == "":
+        d = date.today()
+    elif isinstance(d, str):
+        try:
+            d = date.fromisoformat(d[:10])
+        except ValueError:
+            d = date.today()
+    for start, rate in IRS_RATES:
+        if d >= start:
+            return rate
+    return 0.655
 
 mileage_routes = APIRouter(prefix="/api", tags=["mileage"])
 
@@ -78,7 +101,7 @@ def to_entry(row):
         "endLocation": row.get("end_location"),
         "miles": miles,
         "purpose": row.get("purpose"),
-        "deduction": round(miles * IRS_RATE, 2),
+        "deduction": round(miles * irs_rate(row.get("date")), 2),
         "approvalStatus": row.get("approval_status", "approved"),
         "createdAt": str(row.get("created_at", "")),
     }
@@ -122,7 +145,7 @@ async def list_mileage(current_user=Depends(get_current_user)):
         "totalMiles": round(total_miles, 2),
         "totalDeduction": round(total_deduction, 2),
         "pendingCount": pending_count,
-        "irsRate": IRS_RATE,
+        "irsRate": irs_rate(),
         "isOwner": can_approve,
     }
 
