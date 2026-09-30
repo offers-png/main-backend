@@ -124,7 +124,7 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
         async with httpx.AsyncClient(timeout=15.0) as client:
             await client.post(
                 f"{SUPABASE_URL}/functions/v1/send-invoice",
-                headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+                headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json", "X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
                 json={
                     "to": body.email,
                     "from": "ReceiptVault",

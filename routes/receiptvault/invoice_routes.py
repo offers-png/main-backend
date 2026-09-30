@@ -536,7 +536,7 @@ async def send_invoice(invoice_id: str, current_user=Depends(get_current_user)):
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             f"{SUPABASE_URL}/functions/v1/send-invoice",
-            headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+            headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json", "X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
             json={
                 "to": invoice_row["customer_email"],
                 "from": business.get("business_name", "ReceiptVault"),

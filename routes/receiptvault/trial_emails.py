@@ -36,7 +36,7 @@ async def _send_email(to: str, subject: str, html: str):
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(
             SEND_EMAIL_URL,
-            headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+            headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json", "X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
             json={"to": to, "from": "ReceiptVault", "subject": subject, "html": html},
         )
         resp.raise_for_status()

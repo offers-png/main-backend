@@ -236,7 +236,7 @@ async def _notify_owner(business: dict, federal_owed: float, state_owed: float, 
             async with httpx.AsyncClient(timeout=15.0) as client:
                 await client.post(
                     SEND_EMAIL_URL,
-                    headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+                    headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json", "X-Relay-Secret": os.getenv("EMAIL_RELAY_SECRET", "")},
                     json={"to": owner_email, "from": "ReceiptVault", "subject": "Your accountant submitted your tax documents", "html": html},
                 )
         except Exception as e:
