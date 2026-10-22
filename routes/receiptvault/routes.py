@@ -212,6 +212,20 @@ def _sanity_check_receipt_date(receipt_date: Optional[str], reference_date: date
     return receipt_date
 
 
+def _email_text(b64: str) -> str:
+    """Plain text from an emailed receipt's HTML (tags, styles and scripts
+    stripped) for the AI to read."""
+    import re as _re
+    import html as _html
+    raw = b64lib.b64decode(b64).decode("utf-8", errors="replace")
+    raw = _re.sub(r"(?is)<(script|style|head)[^>]*>.*?</\1>", " ", raw)
+    raw = _re.sub(r"(?i)<br\s*/?>|</(p|div|tr|li|h\d)>", "\n", raw)
+    raw = _re.sub(r"<[^>]+>", " ", raw)
+    raw = _html.unescape(raw)
+    raw = _re.sub(r"\n\s*\n+", "\n", raw)
+    return _re.sub(r"[ \t\r\f\v]+", " ", raw).strip()
+
+
 async def extract_receipt_data(image_base64: str, mime_type: str, reference_date: Optional[datetime] = None) -> dict:
     """Use Claude Vision to extract merchant, amount, date, category from receipt image.
     reference_date is the upload date to sanity-check the extracted date against —
@@ -223,12 +237,16 @@ async def extract_receipt_data(image_base64: str, mime_type: str, reference_date
         return {}
 
     is_pdf = "pdf" in (mime_type or "").lower()
+    # Emailed receipts with no attachment arrive as the email's text/HTML
+    is_text = (mime_type or "").lower().startswith("text/")
 
     # Normalize mime — in-app camera uploads send "image/jpg", which the API
     # rejects (it only accepts image/jpeg, png, gif, webp)
     mime_type = (mime_type or "").lower().strip()
     if is_pdf:
         mime_type = "application/pdf"
+    elif is_text:
+        pass
     elif mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
         mime_type = "image/png" if "png" in mime_type else "image/jpeg"
 
@@ -236,7 +254,7 @@ async def extract_receipt_data(image_base64: str, mime_type: str, reference_date
     # and phone cameras routinely exceed that. Resizing also speeds up OCR.
     try:
         raw = b64lib.b64decode(image_base64)
-        if not is_pdf and len(raw) > 1_500_000:  # anything over ~1.5MB gets resized
+        if not is_pdf and not is_text and len(raw) > 1_500_000:  # anything over ~1.5MB gets resized
             from io import BytesIO
             from PIL import Image, ImageOps
 
@@ -295,6 +313,8 @@ CRITICAL RULES:
                         {
                             "role": "user",
                             "content": [
+                                {"type": "text", "text": "RECEIPT / INVOICE EMAIL TEXT:\n" + _email_text(image_base64)[:30000]}
+                                if is_text else
                                 {
                                     "type": "document" if is_pdf else "image",
                                     "source": {
