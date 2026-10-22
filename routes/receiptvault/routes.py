@@ -30,29 +30,16 @@ receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
 _supabase_client = None
 
-CATEGORIES = ["Inventory", "Meals & Entertainment", "Travel", "Office Supplies", "Utilities", "Software & Subscriptions", "Advertising", "Vehicle & Fuel", "Equipment", "Other"]
-
-# IRS Schedule C expense lines this product maps every receipt to, for the
-# self-employed owner's tax prep. Deliberately a small, real-world subset of
-# the full Schedule C line list — the ones a convenience-store-style small
-# business actually hits.
-SCHEDULE_C_LINES = ["Advertising", "Car/Truck", "Rent", "Supplies", "Meals", "Utilities", "Other"]
-
-# Best-effort fallback mapping from the general CATEGORIES taxonomy to a
-# Schedule C line, used only when OCR doesn't return schedule_c_line directly
-# (e.g. on older re-extractions or if the model omits the field).
-CATEGORY_TO_SCHEDULE_C_LINE = {
-    "Inventory": "Supplies",
-    "Meals & Entertainment": "Meals",
-    "Travel": "Car/Truck",
-    "Office Supplies": "Supplies",
-    "Utilities": "Utilities",
-    "Software & Subscriptions": "Other",
-    "Advertising": "Advertising",
-    "Vehicle & Fuel": "Car/Truck",
-    "Equipment": "Supplies",
-    "Other": "Other",
-}
+# One shared category list with Schedule C lines — see categories.py.
+from routes.receiptvault.categories import (  # noqa: E402
+    CATEGORY_NAMES as CATEGORIES,
+    SCHEDULE_C_LINES,
+    CATEGORY_TO_LINE as CATEGORY_TO_SCHEDULE_C_LINE,
+    normalize_category,
+    line_for,
+    prompt_category_list,
+    public_categories,
+)
 
 def get_supabase() -> Client:
     global _supabase_client
@@ -235,21 +222,21 @@ async def extract_receipt_data(image_base64: str, mime_type: str, reference_date
         print("[extract] ANTHROPIC_API_KEY not set on Render — skipping OCR, fields will be blank")
         return {}
 
-    # Claude Vision only supports images, not PDFs
-    if "pdf" in mime_type:
-        return {}
+    is_pdf = "pdf" in (mime_type or "").lower()
 
     # Normalize mime — in-app camera uploads send "image/jpg", which the API
     # rejects (it only accepts image/jpeg, png, gif, webp)
     mime_type = (mime_type or "").lower().strip()
-    if mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+    if is_pdf:
+        mime_type = "application/pdf"
+    elif mime_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
         mime_type = "image/png" if "png" in mime_type else "image/jpeg"
 
     # Downscale large camera captures — the API rejects images over 5MB,
     # and phone cameras routinely exceed that. Resizing also speeds up OCR.
     try:
         raw = b64lib.b64decode(image_base64)
-        if len(raw) > 1_500_000:  # anything over ~1.5MB gets resized
+        if not is_pdf and len(raw) > 1_500_000:  # anything over ~1.5MB gets resized
             from io import BytesIO
             from PIL import Image, ImageOps
 
@@ -273,9 +260,11 @@ Extract the following from this receipt/invoice image and return ONLY valid JSON
   "merchant": "name of the company SELLING the goods (the vendor/supplier, NOT the buyer)",
   "amount": 12.99,
   "receipt_date": "YYYY-MM-DD",
-  "category": "one of: {', '.join(CATEGORIES)}",
-  "schedule_c_line": "one of: {', '.join(SCHEDULE_C_LINES)}"
+  "category": "one of the category names listed below"
 }}
+
+CATEGORIES (pick exactly one name):
+{prompt_category_list()}
 
 CRITICAL RULES:
 - "merchant" = the SELLER/VENDOR/SUPPLIER name at the TOP of the invoice (e.g. PepsiCo, Heffron Distributing, Restaurant Depot, Walmart, Husted Dairy)
@@ -283,19 +272,10 @@ CRITICAL RULES:
 - On distributor invoices: "Send payment to" or the company logo at top = the merchant
 - amount = the final TOTAL DUE or TOTAL amount (a number, no $ sign)
 - receipt_date = YYYY-MM-DD format, or null
-- category must be exactly one of the provided options
-- For beverage distributors, food suppliers, dairy: use "Inventory"
-- For restaurant supply stores: use "Inventory"
-- For office/store supplies (bags, cups, t-shirts): use "Office Supplies"
+- category must be exactly one of the names above
+- For beverage distributors, food suppliers, dairy, restaurant supply stores: use "Inventory"
+- For bags, cups, cleaning and store supplies: use "Supplies"
 - For gas/fuel: use "Vehicle & Fuel"
-- schedule_c_line is this receipt's IRS Schedule C expense line, for the owner's tax filing:
-  - "Advertising" = marketing, signage, promo materials
-  - "Car/Truck" = fuel, vehicle maintenance, delivery mileage-related purchases
-  - "Rent" = rent or lease payments for the business location or equipment
-  - "Supplies" = inventory, store/office supplies, equipment, consumables
-  - "Meals" = business meals and entertainment
-  - "Utilities" = electric, gas, water, phone, internet
-  - "Other" = anything that doesn't fit the above
 - If you cannot find a value, use null
 - Return ONLY the JSON object, no explanation, no markdown"""
 
@@ -316,7 +296,7 @@ CRITICAL RULES:
                             "role": "user",
                             "content": [
                                 {
-                                    "type": "image",
+                                    "type": "document" if is_pdf else "image",
                                     "source": {
                                         "type": "base64",
                                         "media_type": mime_type,
@@ -340,13 +320,20 @@ CRITICAL RULES:
             if text.startswith("json"):
                 text = text[4:]
         parsed = json.loads(text.strip())
-        if parsed.get("schedule_c_line") not in SCHEDULE_C_LINES:
-            parsed["schedule_c_line"] = CATEGORY_TO_SCHEDULE_C_LINE.get(parsed.get("category"), "Other")
+        # The Schedule C line always follows from the one shared category list
+        parsed["category"] = normalize_category(parsed.get("category"))
+        parsed["schedule_c_line"] = line_for(parsed.get("category"))
         parsed["receipt_date"] = _sanity_check_receipt_date(parsed.get("receipt_date"), reference_date or datetime.utcnow())
         return parsed
     except Exception as ocr_err:
         print(f"OCR error: {ocr_err}")
         return {}
+
+
+@receipt_routes.get("/categories")
+async def list_categories():
+    """The one shared category list, each with its Schedule C line."""
+    return public_categories()
 
 
 @receipt_routes.get("/user")
@@ -776,7 +763,8 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
     if body.receiptDate is not None:
         update_data["receipt_date"] = body.receiptDate
     if body.category is not None:
-        update_data["category"] = body.category
+        update_data["category"] = normalize_category(body.category)
+        update_data["schedule_c_line"] = line_for(update_data["category"])
     if body.scheduleCLine is not None:
         if body.scheduleCLine not in SCHEDULE_C_LINES:
             raise HTTPException(status_code=400, detail=f"scheduleCLine must be one of: {', '.join(SCHEDULE_C_LINES)}")
@@ -802,7 +790,6 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
     _b, uploader_role_for_limit = resolve_role(supabase, current_user.user.id)
     check_scan_allowed(supabase, business, uploader_role_for_limit)
 
-    supabase_url = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
     content_type = request.headers.get("content-type", "")
 
     if "application/json" in content_type:
@@ -829,44 +816,64 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
     else:
         raise HTTPException(status_code=400, detail="Unsupported content type")
 
+    # Owner/manager/bookkeeper uploads auto-approve; employee uploads need approval
+    _, uploader_role = resolve_role(supabase, current_user.user.id)
+    row = await save_receipt(
+        supabase, business, content=content, original_name=original_name, ext=ext, mime=mime,
+        submitted_by=current_user.user.id,
+        approval_status="approved" if uploader_role in AUTO_APPROVE_ROLES else "pending",
+        ocr_base64=ocr_base64,
+    )
+    return JSONResponse(status_code=201, content=to_receipt(row))
+
+
+async def save_receipt(supabase, business: dict, *, content: bytes, original_name: str, ext: str, mime: str,
+                       submitted_by: str, approval_status: str = "approved", ocr_base64: Optional[str] = None,
+                       notes: Optional[str] = None, check_duplicate_name: bool = True) -> dict:
+    """Store the file, read it with AI, save the receipt row, then try to
+    match it to a bank charge. Raises 409 on a duplicate file name."""
+    business_id = business["id"]
+    supabase_url = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
+
+    # ── Duplicate check (before spending storage + an AI call) ──────────
+    if check_duplicate_name:
+        existing = (
+            supabase.table("receipts")
+            .select("id, original_name")
+            .eq("business_id", business_id)
+            .eq("original_name", original_name)
+            .execute()
+        )
+        if existing.data:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
+            )
+
     # Upload to Supabase Storage
     unique = f"{int(time.time() * 1000)}-{random.randint(0, 999999999)}{ext}"
     supabase.storage.from_("receipts").upload(unique, content, {"content-type": mime})
     file_url = f"{supabase_url}/storage/v1/object/public/receipts/{unique}"
 
-    # Run OCR via Claude Vision (non-blocking — if it fails, receipt still saves)
-    ocr_data = await extract_receipt_data(ocr_base64, mime)
-
-    # ── Duplicate check ─────────────────────────────────────────────────
-    existing = (
-        supabase.table("receipts")
-        .select("id, original_name")
-        .eq("business_id", business_id)
-        .eq("original_name", original_name)
-        .execute()
-    )
-    if existing.data:
-        raise HTTPException(
-            status_code=409,
-            detail=f"A receipt named '{original_name}' already exists. Delete the old one first or rename the file."
-        )
-
-    # Owner/manager/bookkeeper uploads auto-approve; employee uploads need approval
-    _, uploader_role = resolve_role(supabase, current_user.user.id)
-    approval_status = "approved" if uploader_role in AUTO_APPROVE_ROLES else "pending"
+    # Read it with AI (if that fails, the receipt still saves)
+    ocr_data = await extract_receipt_data(ocr_base64 or b64lib.b64encode(content).decode("utf-8"), mime)
 
     insert_payload = {
         "business_id": business_id,
         "file_path": file_url,
         "original_name": original_name,
-        "submitted_by": current_user.user.id,
+        "submitted_by": submitted_by,
         "approval_status": approval_status,
     }
-
+    if notes:
+        insert_payload["notes"] = notes
     if ocr_data.get("merchant"):
         insert_payload["merchant"] = ocr_data["merchant"]
     if ocr_data.get("amount") is not None:
-        insert_payload["amount"] = float(ocr_data["amount"])
+        try:
+            insert_payload["amount"] = float(ocr_data["amount"])
+        except (TypeError, ValueError):
+            pass
     if ocr_data.get("receipt_date"):
         insert_payload["receipt_date"] = ocr_data["receipt_date"]
     if ocr_data.get("category"):
@@ -877,7 +884,17 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
     receipt = supabase.table("receipts").insert(insert_payload).execute()
     if not receipt.data:
         raise HTTPException(status_code=500, detail="Failed to create receipt record")
-    return JSONResponse(status_code=201, content=to_receipt(receipt.data[0]))
+    row = receipt.data[0]
+
+    # Match the new receipt to a bank charge (Basic and up)
+    try:
+        from routes.receiptvault.entitlements import account_for_business, has_feature
+        if has_feature(account_for_business(supabase, business), "auto_categorize"):
+            from routes.receiptvault.bank_core import match_receipt
+            match_receipt(supabase, business_id, row)
+    except Exception as e:
+        print(f"[receipts] matching after upload failed: {e}")
+    return row
 
 
 @receipt_routes.delete("/receipts/{receipt_id}", dependencies=[Depends(require_active_subscription)])
@@ -952,6 +969,7 @@ async def resend_all(current_user=Depends(get_current_user)):
                 accountant_email=business.get("accountant_email", ""),
                 receipts=receipts,
                 period_label=period_label,
+                bank_transactions=_bank_charges_for_report(supabase, business["id"]),
             )
             pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
             pdf_filename = f"ReceiptVault_{safe_name}_{month_str}_RESEND.pdf"
@@ -1065,6 +1083,7 @@ async def send_now(current_user=Depends(get_current_user)):
                 accountant_email=business.get("accountant_email", ""),
                 receipts=receipts,
                 period_label=period_label,
+                bank_transactions=_bank_charges_for_report(supabase, business["id"]),
             )
             pdf_base64 = b64lib.b64encode(pdf_bytes).decode("utf-8")
             pdf_filename = f"ReceiptVault_{safe_name}_{month_str}.pdf"
@@ -1133,3 +1152,17 @@ async def send_now(current_user=Depends(get_current_user)):
 
     # Return immediately — email sends in background
     return {"ok": True, "sent": sent_count, "status": "sending"}
+
+
+def _bank_charges_for_report(supabase, business_id: str) -> list:
+    """This month's business bank charges for the accountant PDF (personal
+    and ignored ones left out). Never blocks a send."""
+    try:
+        from datetime import date as _date
+        from routes.receiptvault.bank_core import business_transactions
+        today = _date.today()
+        rows = business_transactions(supabase, business_id, today.replace(day=1).isoformat(), today.isoformat())
+        return [r for r in rows if float(r.get("amount") or 0) < 0]
+    except Exception as e:
+        print(f"[report] bank charges skipped: {e}")
+        return []

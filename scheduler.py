@@ -131,6 +131,7 @@ async def send_for_business(business: dict):
             accountant_email=acct_email,
             receipts=receipts,
             period_label=period_label,
+            bank_transactions=_bank_charges_for_report(supabase, biz_id),
         )
         excel_bytes = build_excel(
             business_name=biz_name,
@@ -209,3 +210,17 @@ async def run_scheduled_sends():
                 await send_for_business(biz)
     except Exception as e:
         print(f"[scheduler] top-level error: {e}")
+
+
+def _bank_charges_for_report(supabase, business_id: str) -> list:
+    """This month's business bank charges for the accountant PDF (personal
+    and ignored ones left out). Never blocks a send."""
+    try:
+        from datetime import date as _date
+        from routes.receiptvault.bank_core import business_transactions
+        today = _date.today()
+        rows = business_transactions(supabase, business_id, today.replace(day=1).isoformat(), today.isoformat())
+        return [r for r in rows if float(r.get("amount") or 0) < 0]
+    except Exception as e:
+        print(f"[report] bank charges skipped: {e}")
+        return []

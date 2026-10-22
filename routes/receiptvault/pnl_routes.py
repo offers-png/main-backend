@@ -86,13 +86,31 @@ def _totals_for_period(supabase, business_id: str, start: str, end: str, group_b
             total_out += amount
             bump(label, "out", amount)
 
+    # Bank charges (personal and ignored ones left out). A receipt matched
+    # to a bank charge is the same money, so only the charge is counted.
+    from routes.receiptvault.bank_core import business_transactions, matched_receipt_ids_in
+    matched = matched_receipt_ids_in(supabase, business_id)
+
     for r in receipts:
         amount = float(r.get("amount") or 0)
-        if not amount:
+        if not amount or r["id"] in matched:
             continue
         label = _receipt_group_label(r, group_by)
         total_out += amount
         bump(label, "out", amount)
+
+    for t in business_transactions(supabase, business_id, start, end):
+        amount = float(t.get("amount") or 0)
+        if group_by == "scheduleCLine":
+            label = t.get("schedule_c_line") or ("Income" if amount > 0 else "Uncategorized")
+        else:
+            label = t.get("category") or "Uncategorized"
+        if amount > 0:
+            total_in += amount
+            bump(label, "in", amount)
+        else:
+            total_out += -amount
+            bump(label, "out", -amount)
 
     return total_in, total_out, breakdown
 
