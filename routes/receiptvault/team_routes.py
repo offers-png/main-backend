@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from supabase import create_client
 from typing import List
 from routes.receiptvault.routes import get_current_user, get_business_for_user, to_receipt, ALL_MODULES
+from routes.receiptvault.stores import resolve_store
 import httpx
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
@@ -19,24 +20,15 @@ def get_supabase():
 
 
 def get_owner_business_only(supabase, user_id: str):
-    """Returns business only if user is the OWNER."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    return result.data[0] if result.data else None
+    """Returns the active store only if user is its OWNER."""
+    business, role, _m = resolve_store(supabase, user_id)
+    return business if role == "owner" else None
 
 
 def get_approver_business(supabase, user_id: str):
-    """Owner or manager — can view team and approve receipts."""
-    biz = get_owner_business_only(supabase, user_id)
-    if biz:
-        return biz
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data and member.data[0].get("role") == "manager":
-        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if b.data:
-            return b.data[0]
-    return None
-
-
+    """Owner or manager of the active store — can view team and approve receipts."""
+    business, role, _m = resolve_store(supabase, user_id)
+    return business if role in ("owner", "manager") else None
 
 
 def to_member(row):

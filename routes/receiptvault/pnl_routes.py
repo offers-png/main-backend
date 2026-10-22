@@ -54,7 +54,9 @@ def _default_period() -> tuple:
 def _format_period_label(start_d: date, end_d: date) -> str:
     if start_d.replace(day=1) == start_d and end_d == date.today() and start_d.month == end_d.month and start_d.year == end_d.year:
         return start_d.strftime("%B %Y")
-    return f"{start_d.strftime('%b %-d, %Y')} – {end_d.strftime('%b %-d, %Y')}"
+    def fmt(d: date) -> str:  # portable "%b %-d, %Y" (no %-d on Windows)
+        return f"{d.strftime('%b')} {d.day}, {d.year}"
+    return f"{fmt(start_d)} – {fmt(end_d)}"
 
 
 def _totals_for_period(supabase, business_id: str, start: str, end: str, group_by: str):

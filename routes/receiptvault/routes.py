@@ -74,54 +74,42 @@ def get_supabase() -> Client:
     return _supabase_client
 
 
+from routes.receiptvault.stores import resolve_store, ALL_MODULES  # noqa: E402
+
+
 def get_business_for_user(supabase, user_id: str):
-    """Get business for owner OR active team member."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        return result.data[0]
-    member = supabase.table("business_users").select("business_id").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
+    """The active store (X-Business-Id) for an owner OR active team member."""
+    business, _role, _modules = resolve_store(supabase, user_id)
+    return business
 
 
 def resolve_role(supabase, user_id: str):
-    """Returns (business, role). role is 'owner' | 'manager' | 'bookkeeper' | 'employee'.
-    Returns (None, None) if user has no business."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        return result.data[0], "owner"
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0], member.data[0].get("role") or "employee"
-    return None, None
-
-
-ALL_MODULES = ["receipts", "money_box", "mileage", "invoices", "inventory"]
+    """Returns (business, role) for the active store. role is 'owner' |
+    'manager' | 'bookkeeper' | 'employee'. (None, None) if user has no store."""
+    business, role, _modules = resolve_store(supabase, user_id)
+    return business, role
 
 
 def resolve_module_access(supabase, user_id: str, module: str):
-    """Returns the business dict if this user can access `module`.
+    """Returns the active store if this user can access `module` there.
     The owner always has every module. Team members only have what the
     owner explicitly checked off for them on the Team page.
     Raises 403 if they're on the team but don't have this module, 404 if
     they have no business relationship at all."""
-    biz = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if biz.data:
-        return biz.data[0]  # owner: full access, always
-    member = supabase.table("business_users").select("business_id, modules").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        modules = member.data[0].get("modules") or []
-        if module not in modules:
-            raise HTTPException(status_code=403, detail=f"You don't have access to this. Ask the owner to add it on the Team page.")
-        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if b.data:
-            return b.data[0]
-    raise HTTPException(status_code=404, detail="Business not found")
+    business, role, modules = resolve_store(supabase, user_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if role != "owner" and module not in (modules or []):
+        raise HTTPException(status_code=403, detail="You don't have access to this. Ask the owner to add it on the Team page.")
+    return business
+
+
+def require_owner_store(supabase, user_id: str):
+    """The active store, only if this user OWNS it."""
+    business, role, _modules = resolve_store(supabase, user_id)
+    if not business or role != "owner":
+        return None
+    return business
 
 
 # Roles allowed to auto-approve their own submissions
@@ -158,8 +146,12 @@ async def require_active_subscription(current_user=Depends(get_current_user)):
     business, _role = resolve_role(supabase, current_user.user.id)
     if business is None:
         return
-    plan = business.get("plan")
-    trial_ends_at = business.get("trial_ends_at")
+    # Billing is per owner account: read it from the owner's first store,
+    # so every extra store rides on the same plan.
+    from routes.receiptvault.stores import owned_stores
+    first = (owned_stores(supabase, business["user_id"]) or [business])[0]
+    plan = first.get("plan")
+    trial_ends_at = first.get("trial_ends_at")
     in_trial = bool(trial_ends_at and trial_ends_at > datetime.utcnow().isoformat())
     if not plan and not in_trial:
         raise HTTPException(
@@ -366,61 +358,54 @@ async def get_user(current_user=Depends(get_current_user)):
     }
 
 
+def business_payload(supabase, business: dict, role: str, modules: list, user_id: str) -> dict:
+    """/api/business shape for one store, shared by /business and /stores."""
+    from routes.receiptvault.stores import owned_stores
+    referral_count = 0
+    if role == "owner":
+        referral_rows = supabase.table("referrals").select("id").eq("referrer_business_id", business["id"]).execute()
+        referral_count = len(referral_rows.data or [])
+    out = to_business(business, referral_count)
+    out["role"] = role
+    out["modules"] = list(ALL_MODULES) if role == "owner" else (modules or [])
+    if role == "owner":
+        out["storeCount"] = len(owned_stores(supabase, user_id))
+        if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
+            out["setupRequired"] = "accountant"
+    else:
+        out["isTeamMember"] = True
+    return out
+
+
 @receipt_routes.get("/business")
 async def get_business(current_user=Depends(get_current_user)):
+    """The active store (X-Business-Id header, else the user's first store)."""
     supabase = get_supabase()
     user_id = current_user.user.id
 
-    # First check if user owns a business
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        business = result.data[0]
-        referral_rows = (
-            supabase.table("referrals")
-            .select("id")
-            .eq("referrer_business_id", business["id"])
-            .execute()
-        )
-        referral_count = len(referral_rows.data or [])
-        out = to_business(business, referral_count)
-        out["role"] = "owner"
-        out["modules"] = ALL_MODULES
-        if not business.get("accountant_email") or not business.get("send_frequency") or not business.get("send_day"):
-            out["setupRequired"] = "accountant"
-        return out
+    business, role, modules = resolve_store(supabase, user_id)
+    if business:
+        return business_payload(supabase, business, role, modules, user_id)
 
-    # Check if user is an active team member
-    member = supabase.table("business_users").select("*").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        business_id = member.data[0]["business_id"]
-        biz = supabase.table("businesses").select("*").eq("id", business_id).execute()
-        if biz.data:
-            out = to_business(biz.data[0])
-            out["role"] = member.data[0].get("role", "employee")
-            out["modules"] = member.data[0].get("modules") or []
-            out["isTeamMember"] = True
-            return out
-
-    # Auto-link: check if there is a pending invite for this user's email
+    # Auto-link: activate any pending invites sent to this user's email
     user_email = current_user.user.email
     if user_email:
-        pending = supabase.table("business_users").select("*").eq("email", user_email).execute()
-        if pending.data:
-            invite = pending.data[0]
-            # Update placeholder user_id to real UUID and activate
+        pending = (
+            supabase.table("business_users").select("*")
+            .eq("email", user_email).eq("status", "invited")
+            .execute()
+        )
+        for invite in (pending.data or []):
             supabase.table("business_users").update({
                 "user_id": user_id,
                 "status": "active",
                 "joined_at": datetime.utcnow().isoformat(),
             }).eq("id", invite["id"]).execute()
-            # Now return their business
-            biz = supabase.table("businesses").select("*").eq("id", invite["business_id"]).execute()
+        if pending.data:
+            biz = supabase.table("businesses").select("*").eq("id", pending.data[0]["business_id"]).execute()
             if biz.data:
-                out = to_business(biz.data[0])
-                out["role"] = invite.get("role", "employee")
-                out["modules"] = invite.get("modules") or []
-                out["isTeamMember"] = True
-                return out
+                invite = pending.data[0]
+                return business_payload(supabase, biz.data[0], invite.get("role") or "employee", invite.get("modules") or [], user_id)
 
     return {"setupRequired": "business"}
 
@@ -509,8 +494,11 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
     supabase = get_supabase()
     user_id = current_user.user.id
 
-    # Does this user already own a business?
-    owned = supabase.table("businesses").select("id").eq("user_id", user_id).execute()
+    # Editing the active store if this user owns it; a brand-new owner
+    # (no stores, no memberships) creates their first store below.
+    # Additional stores go through POST /api/stores instead.
+    active_store, active_role, _m = resolve_store(supabase, user_id)
+    owned = type("R", (), {"data": [active_store] if active_store and active_role == "owner" else []})()
 
     if body.weekStartDay is not None and not (0 <= body.weekStartDay <= 6):
         raise HTTPException(status_code=400, detail="weekStartDay must be 0-6 (0=Sunday)")
@@ -543,8 +531,7 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
     else:
         # Not an owner. If they're already a team member somewhere, they don't
         # get to create/edit a business profile — only the owner can.
-        member = supabase.table("business_users").select("id").eq("user_id", user_id).eq("status", "active").execute()
-        if member.data:
+        if active_store is not None:
             raise HTTPException(status_code=403, detail="Only the business owner can edit the business profile.")
         # Brand new user with no business and no team membership — normal
         # first-time signup flow. They become the owner of a new business.
@@ -665,13 +652,10 @@ class AccountantConfigBody(BaseModel):
 @receipt_routes.post("/setup/accountant")
 async def setup_accountant(body: AccountantConfigBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    owned = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
-    if not owned.data:
+    store = require_owner_store(supabase, current_user.user.id)
+    if not store:
         raise HTTPException(status_code=403, detail="Only the business owner can edit accountant settings.")
-    biz = type("R", (), {"data": [{"id": owned.data[0]["id"]}]})()
-    if not biz.data:
-        raise HTTPException(status_code=400, detail="Business profile must be created first")
-    business_id = biz.data[0]["id"]
+    business_id = store["id"]
     data = {
         "accountant_email": body.accountantEmail,
         "send_frequency": body.sendFrequency,
@@ -699,10 +683,10 @@ async def save_payment_options(body: PaymentOptionsBody, current_user=Depends(ge
     that route didn't exist here before (only /api/setup/business accepted
     these fields), which is why saving from the Settings page 404'd."""
     supabase = get_supabase()
-    owned = supabase.table("businesses").select("id").eq("user_id", current_user.user.id).execute()
-    if not owned.data:
+    store = require_owner_store(supabase, current_user.user.id)
+    if not store:
         raise HTTPException(status_code=404, detail="Business not found")
-    business_id = owned.data[0]["id"]
+    business_id = store["id"]
     data = {
         "zelle_contact": body.zelle or None,
         "cashapp_tag": body.cashApp or None,

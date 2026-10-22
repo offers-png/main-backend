@@ -20,16 +20,10 @@ def get_supabase():
 
 
 def get_business_for_user(supabase, user_id: str):
-    """OWNER + BOOKKEEPER access to invoices."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        return result.data[0]
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data and member.data[0].get("role") in ("bookkeeper",):
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
+    """OWNER + BOOKKEEPER access to the active store's invoices."""
+    from routes.receiptvault.stores import resolve_store
+    business, role, _m = resolve_store(supabase, user_id)
+    return business if role in ("owner", "bookkeeper") else None
 
 
 
@@ -406,6 +400,10 @@ async def update_invoice(invoice_id: str, body: UpdateInvoiceBody, current_user=
     if not biz.data:
         raise HTTPException(status_code=404, detail="Not found")
     business_id = biz.data[0]["id"]
+    owned = supabase.table("invoices").select("id").eq("id", invoice_id)\
+        .eq("business_id", business_id).execute()
+    if not owned.data:
+        raise HTTPException(status_code=404, detail="Invoice not found")
 
     update_data = {}
     if body.customerName is not None: update_data["customer_name"] = body.customerName

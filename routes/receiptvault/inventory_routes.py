@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 from routes.receiptvault.routes import get_current_user
+from routes.receiptvault.stores import resolve_store
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -16,16 +17,9 @@ def get_supabase():
 
 
 def get_business_for_user(supabase, user_id: str):
-    """OWNER + MANAGER access to inventory."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        return result.data[0]
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data and member.data[0].get("role") in ("manager",):
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
+    """OWNER + MANAGER access to the active store's inventory."""
+    business, role, _m = resolve_store(supabase, user_id)
+    return business if role in ("owner", "manager") else None
 
 
 def to_item(row):
@@ -153,7 +147,7 @@ async def adjust_stock(item_id: str, body: AdjustStockBody, current_user=Depends
         new_qty = body.quantity
     supabase.table("inventory_items").update({
         "quantity": new_qty, "updated_at": datetime.utcnow().isoformat()
-    }).eq("id", item_id).execute()
+    }).eq("id", item_id).eq("business_id", business_id).execute()
     supabase.table("inventory_transactions").insert({
         "business_id": business_id, "item_id": item_id,
         "type": body.type, "quantity": body.quantity, "notes": body.notes,
@@ -165,14 +159,17 @@ async def adjust_stock(item_id: str, body: AdjustStockBody, current_user=Depends
 async def delete_item(item_id: str, current_user=Depends(get_current_user)):
     business_id = await get_business_id(current_user)
     supabase = get_supabase()
-    supabase.table("inventory_transactions").delete().eq("item_id", item_id).execute()
+    supabase.table("inventory_transactions").delete().eq("item_id", item_id)\
+        .eq("business_id", business_id).execute()
     supabase.table("inventory_items").delete().eq("id", item_id)\
         .eq("business_id", business_id).execute()
     return {"ok": True}
 
 @inventory_routes.get("/inventory/{item_id}/history")
 async def item_history(item_id: str, current_user=Depends(get_current_user)):
+    business_id = await get_business_id(current_user)
     supabase = get_supabase()
     rows = supabase.table("inventory_transactions").select("*").eq("item_id", item_id)\
+        .eq("business_id", business_id)\
         .order("created_at", desc=True).limit(50).execute()
     return rows.data or []

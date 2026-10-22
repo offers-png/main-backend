@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 from routes.receiptvault.routes import get_current_user, resolve_module_access
+from routes.receiptvault.stores import resolve_store
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -40,54 +41,24 @@ def get_supabase():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_owner_business(supabase, user_id: str):
-    """Returns business if user is the OWNER, else None."""
-    result = supabase.table("businesses").select("*").eq("user_id", user_id).execute()
-    return result.data[0] if result.data else None
-
-
-def get_member_business(supabase, user_id: str):
-    """Returns business if user is an active TEAM MEMBER, else None."""
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        biz = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if biz.data:
-            return biz.data[0]
-    return None
-
-
 def resolve_access(supabase, user_id: str):
-    """Returns (business, is_owner). Raises 404 if no business."""
-    biz = get_owner_business(supabase, user_id)
-    if biz:
-        return biz, True
-    biz = get_member_business(supabase, user_id)
-    if biz:
-        return biz, False
-    raise HTTPException(status_code=404, detail="Business not found")
+    """Returns (active store, is_owner). Raises 404 if no business."""
+    business, role, _m = resolve_store(supabase, user_id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    return business, role == "owner"
 
 
 def get_role(supabase, user_id: str):
-    """Returns role string or None."""
-    if get_owner_business(supabase, user_id):
-        return "owner"
-    member = supabase.table("business_users").select("role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data:
-        return member.data[0].get("role") or "employee"
-    return None
+    """Role in the active store, or None."""
+    _business, role, _m = resolve_store(supabase, user_id)
+    return role
 
 
 def get_approver_business(supabase, user_id: str):
-    """Returns business if user can approve (owner or manager), else None."""
-    biz = get_owner_business(supabase, user_id)
-    if biz:
-        return biz
-    member = supabase.table("business_users").select("business_id, role").eq("user_id", user_id).eq("status", "active").execute()
-    if member.data and member.data[0].get("role") == "manager":
-        b = supabase.table("businesses").select("*").eq("id", member.data[0]["business_id"]).execute()
-        if b.data:
-            return b.data[0]
-    return None
+    """Returns the active store if user can approve there (owner or manager)."""
+    business, role, _m = resolve_store(supabase, user_id)
+    return business if role in ("owner", "manager") else None
 
 
 def to_entry(row):
