@@ -107,8 +107,23 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
   Payment method, Has receipt (Y/N), Receipt link, Notes. Per store or all
   stores; personal left out by default. Spreadsheet formula injection guarded.
 
+### Export my data / Delete my account (Settings → Your Data)
+- `GET /api/account/export`: a zip with every store the owner has (one
+  folder each: everything as JSON, a CSV per kind of record, and the expenses
+  spreadsheet), the billing account and team memberships. Team members get
+  only the entries they added themselves. Secret tokens are left out.
+- `DELETE /api/account` (needs `{"confirm": "DELETE"}`; the dialog asks you to
+  type DELETE): cancels the Stripe subscription first (if that fails, nothing
+  is deleted), disconnects connected banks, deletes every owned store with all
+  its records and uploaded files, removes team members and the billing
+  account, and takes the person off any teams they're on. Other people's
+  stores are never touched.
+- The Supabase **login itself is kept by default**, because it's shared by
+  every app in this Supabase project. Set `RK_DELETE_AUTH_LOGIN=true` on
+  Render to delete the login too.
+
 ### 8. Verification
-- Backend: 47 automated tests (in-memory database fake; no network) covering
+- Backend: 54 automated tests (in-memory database fake; no network) covering
   store isolation, entitlements/limits, billing flow and webhooks, dedupe,
   vendor rules, matching, personal exclusion, statement parsing for 10 bank
   layouts, bank connection, email forwarding, CSV export, and one end-to-end
@@ -164,6 +179,7 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
    - `RESEND_API_KEY`, `RESEND_INBOUND_WEBHOOK_SECRET`, optional
      `INBOUND_EMAIL_DOMAIN` (default `in.receiptkept.com`)
    - optional `PDFSHIFT_API_KEY` (forwarded emails with no attachment become PDFs)
+   - optional `RK_DELETE_AUTH_LOGIN=true` ("Delete my account" also deletes the shared Supabase login)
    - `FRONTEND_URL=https://receiptkept.com` (several emails still default to
      the old receipts.dealdily.com when this isn't set)
    - existing: `SUPABASE_SERVICE_KEY`, `ANTHROPIC_API_KEY`, `EMAIL_RELAY_SECRET`, `TELNYX_API_KEY`
@@ -189,8 +205,9 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
 - **Money Box vs bank charges:** a vendor paid by card and ALSO typed into
   Money Box will show twice. Owners can tap "Already counted" on the bank
   charge. Automatic matching of Money Box entries wasn't in scope.
-- **Existing bug, not fixed:** Settings → "Export my data" and "Delete my
-  account" call `/api/account/export` and `DELETE /api/account`, which don't
-  exist on the backend, so both buttons fail today (this predates v3).
+- **Privacy policy wording:** it says deleting the account deletes "your
+  account record". With the default (login kept, all ReceiptKept data
+  deleted) that's true of the ReceiptKept account but not the shared login.
+  Either set `RK_DELETE_AUTH_LOGIN=true` or adjust the policy wording.
 - The legacy Express `server/` folder in the front-end repo is unused (the app
   talks to the FastAPI backend); only its category list was updated.

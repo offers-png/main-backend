@@ -11,6 +11,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("SUPABASE_SERVICE_KEY", "test-key")
+# Never let a test reach the real (shared) database, even by accident
+os.environ["SUPABASE_URL"] = "http://127.0.0.1:9"
 
 from fake_supabase import FakeSupabase  # noqa: E402
 
@@ -93,7 +95,10 @@ def db():
 
 @pytest.fixture
 def app(db, monkeypatch):
-    mods = [m for m in (_load(n) for n in RV_MODULES + OPTIONAL_MODULES) if m]
+    import pkgutil
+    import routes.receiptvault as rv_pkg
+    names = {f"routes.receiptvault.{m.name}" for m in pkgutil.iter_modules(rv_pkg.__path__)}
+    mods = [m for m in (_load(n) for n in sorted(names | set(RV_MODULES) | set(OPTIONAL_MODULES))) if m]
     for m in mods:
         if hasattr(m, "get_supabase"):
             monkeypatch.setattr(m, "get_supabase", lambda: db)

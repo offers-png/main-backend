@@ -20,6 +20,7 @@ from routes.receiptvault.statement_routes import statement_routes
 from routes.receiptvault.connect_routes import connect_routes
 from routes.receiptvault.inbound_email_routes import inbound_routes, inbound_webhook_routes
 from routes.receiptvault.export_routes import export_routes
+from routes.receiptvault.account_routes import account_routes
 
 
 def register_receiptkept(app: FastAPI):
@@ -49,5 +50,7 @@ def register_receiptkept(app: FastAPI):
     app.include_router(inbound_routes, dependencies=paid("email_forwarding", writes_only=False))
     app.include_router(inbound_webhook_routes)  # Resend, signed
     app.include_router(export_routes, dependencies=gated)  # CSV export: every plan
+    # Export my data / Delete my account: always allowed, even on a view-only store
+    app.include_router(account_routes)
     # Feedback is never gated — it must work for everyone.
     app.include_router(feedback_routes)
