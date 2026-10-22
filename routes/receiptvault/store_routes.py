@@ -44,10 +44,11 @@ async def create_store(body: NewStoreBody, current_user=Depends(get_current_user
     owned = owned_stores(supabase, user_id)
     if not owned:
         raise HTTPException(status_code=400, detail="Set up your first store before adding another.")
+    active_count = len([b for b in owned if not b.get("archived_at")])
     if not (body.businessName or "").strip() or not (body.businessAddress or "").strip():
         raise HTTPException(status_code=400, detail="Store name and address are required.")
 
-    check_can_add_store(supabase, user_id, len(owned))
+    check_can_add_store(supabase, user_id, active_count)
 
     first = owned[0]
     data = {
@@ -115,3 +116,39 @@ async def stores_summary(start: Optional[str] = None, end: Optional[str] = None,
             "profit": round(sum(s["profit"] for s in stores), 2),
         },
     }
+
+
+def _owned_store_or_404(supabase, user_id: str, store_id: str) -> dict:
+    for b in owned_stores(supabase, user_id):
+        if b["id"] == store_id:
+            return b
+    raise HTTPException(status_code=404, detail="Store not found")
+
+
+@store_routes.post("/stores/{store_id}/archive")
+async def archive_store(store_id: str, current_user=Depends(get_current_user)):
+    """Archive (never delete) an extra store: its data stays, it becomes
+    view-only and stops counting toward the bill."""
+    from routes.receiptvault.entitlements import sync_store_addon_quantity, active_owned_stores
+    supabase = get_supabase()
+    user_id = current_user.user.id
+    store = _owned_store_or_404(supabase, user_id, store_id)
+    if not store.get("archived_at"):
+        if len(active_owned_stores(supabase, user_id)) <= 1:
+            raise HTTPException(status_code=400, detail="You need at least one open store.")
+        supabase.table("businesses").update({"archived_at": datetime.utcnow().isoformat()}).eq("id", store_id).execute()
+        await sync_store_addon_quantity(supabase, user_id)
+    return {"ok": True}
+
+
+@store_routes.post("/stores/{store_id}/restore")
+async def restore_store(store_id: str, current_user=Depends(get_current_user)):
+    from routes.receiptvault.entitlements import check_can_add_store, sync_store_addon_quantity, active_owned_stores
+    supabase = get_supabase()
+    user_id = current_user.user.id
+    store = _owned_store_or_404(supabase, user_id, store_id)
+    if store.get("archived_at"):
+        check_can_add_store(supabase, user_id, len(active_owned_stores(supabase, user_id)))
+        supabase.table("businesses").update({"archived_at": None}).eq("id", store_id).execute()
+        await sync_store_addon_quantity(supabase, user_id)
+    return {"ok": True}

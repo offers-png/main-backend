@@ -78,6 +78,8 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
     if not business:
         raise HTTPException(status_code=403, detail="Only the owner can invite team members")
     supabase = get_supabase()
+    from routes.receiptvault.entitlements import check_team_member_allowed
+    check_team_member_allowed(supabase, business, "owner")
 
     # Check if already invited
     existing = supabase.table("business_users").select("id")\
@@ -100,7 +102,9 @@ async def invite_member(body: InviteMemberBody, current_user=Depends(get_current
 
     # Send invite email via Edge Function (has Resend key configured)
     biz_name = business.get("business_name", "Your employer")
-    invite_link = f"https://receipts.dealdily.com/auth?invite={business['id']}&email={body.email}"
+    from urllib.parse import quote
+    frontend = os.getenv("FRONTEND_URL", "https://receiptkept.com")
+    invite_link = f"{frontend}/auth?invite={business['id']}&email={quote(body.email)}"
     invite_html = f"""<div style="font-family:sans-serif;max-width:500px;margin:0 auto">
       <div style="background:#1a6b3a;padding:24px 32px;border-radius:12px 12px 0 0">
         <h1 style="color:white;margin:0;font-size:20px">ReceiptVault</h1>

@@ -5,7 +5,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
-from routes.receiptvault.routes import get_current_user, resolve_module_access
+from routes.receiptvault.routes import get_current_user, resolve_module_access, plan_feature
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -312,7 +312,7 @@ def _build_pdf(entries: List[dict], period_start: str, period_end: str,
     return buf.getvalue(), total_income, total_expenses, net_income
 
 
-@money_routes.post("/money-packets/generate")
+@money_routes.post("/money-packets/generate", dependencies=[Depends(plan_feature("accountant"))])
 async def generate_money_packet(body: PacketRequestBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "money_box")

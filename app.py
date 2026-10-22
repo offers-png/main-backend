@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from scheduler import run_scheduled_sends
-from routes.receiptvault.trial_emails import check_trial_reminder_emails
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.stores import ActiveStoreMiddleware
 from routes.receiptvault.app_setup import register_receiptkept
@@ -26,9 +25,6 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
     # Run every hour — checks send_day/send_frequency for each business
     scheduler.add_job(run_scheduled_sends, IntervalTrigger(hours=1), id="rv_scheduler", replace_existing=True)
-    # Run every hour — checks trial_ends_at for each business and fires the
-    # day-5/day-7 churn emails once per business (guarded by sent_at flags)
-    scheduler.add_job(check_trial_reminder_emails, IntervalTrigger(hours=1), id="rv_trial_emails", replace_existing=True)
     scheduler.start()
     print("[startup] ReceiptVault scheduler started — runs every hour")
     yield

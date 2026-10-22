@@ -1,205 +1,295 @@
-import os
+"""
+ReceiptKept billing — per owner account, four plans (Free / Basic / Growth /
+Business) plus a per-extra-store add-on. Limits live in entitlements.py.
+
+  GET  /api/billing/plans     public plan list (the front end's only source of limits)
+  GET  /api/billing/status    the active store's account: plan, usage, view-only stores
+  POST /api/billing/checkout  {plan} — new subscription (Checkout) or plan change
+  POST /api/billing/portal    Stripe customer portal (card, invoices, cancel)
+  POST /api/billing/webhook   Stripe events
+"""
+
+import hashlib
+import hmac
 import json
-from datetime import datetime, timedelta
+import os
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from supabase import create_client
-from routes.receiptvault.routes import get_current_user
-import httpx
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
-SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET_ReceiptVault", "")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://receipts.dealdily.com")
+from routes.receiptvault.routes import get_current_user, get_supabase as _rv_get_supabase
+from routes.receiptvault.stores import resolve_store, owned_stores
+from routes.receiptvault import entitlements as ent
 
-PLANS = {
-    "price_1ThalqHDiwSWl43o0HLDGwiH": {"plan": "starter", "member_limit": 10, "amount": 1999},
-    "price_1ThalsHDiwSWl43oOv91jwa0": {"plan": "growth",  "member_limit": 25, "amount": 3499},
-    "price_1ThalvHDiwSWl43olnKArHIQ": {"plan": "business","member_limit": 100,"amount": 5999},
-}
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://receiptkept.com")
+WEBHOOK_TOLERANCE_SECONDS = 300
+REFERRAL_COUPON = os.getenv("STRIPE_REFERRAL_COUPON", "referral-1-month-free")
 
 billing_routes = APIRouter(prefix="/api", tags=["billing"])
 
+
 def get_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _rv_get_supabase()
 
-def stripe_headers():
-    return {
-        "Authorization": f"Bearer {STRIPE_SECRET_KEY}",
-        "Content-Type": "application/x-www-form-urlencoded",
-    }
 
-class CreateCheckoutBody(BaseModel):
-    price_id: str
+def webhook_secret() -> str:
+    return os.getenv("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT") or os.getenv("STRIPE_WEBHOOK_SECRET_ReceiptVault", "")
+
+
+def _owner_account_or_403(supabase, current_user):
+    business, role, _m = resolve_store(supabase, current_user.user.id)
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+    if role != "owner":
+        raise HTTPException(status_code=403, detail="Only the store owner can change the plan.")
+    return business, ent.get_account(supabase, current_user.user.id)
+
 
 @billing_routes.get("/billing/plans")
 async def get_plans():
-    return [
-        {"price_id": "price_1ThalqHDiwSWl43o0HLDGwiH", "plan": "starter",  "name": "Starter",  "price": 19.99, "member_limit": 10,  "features": ["Up to 10 team members", "Receipt OCR", "Mileage tracking", "Invoice creation", "Accountant email reports"]},
-        {"price_id": "price_1ThalsHDiwSWl43oOv91jwa0", "plan": "growth",   "name": "Growth",   "price": 34.99, "member_limit": 25,  "features": ["Up to 25 team members", "Everything in Starter", "Manager & bookkeeper roles", "Priority support"]},
-        {"price_id": "price_1ThalvHDiwSWl43olnKArHIQ", "plan": "business", "name": "Business", "price": 59.99, "member_limit": 100, "features": ["Up to 100 team members", "Everything in Growth", "Dedicated onboarding"]},
-    ]
+    return ent.public_plans()
 
-@billing_routes.post("/billing/checkout")
-async def create_checkout(body: CreateCheckoutBody, current_user=Depends(get_current_user)):
-    if body.price_id not in PLANS:
-        raise HTTPException(status_code=400, detail="Invalid plan")
-
-    supabase = get_supabase()
-    biz = supabase.table("businesses").select("*").eq("user_id", current_user.user.id).execute()
-    if not biz.data:
-        raise HTTPException(status_code=404, detail="Business not found")
-    business = biz.data[0]
-
-    # Create or retrieve Stripe customer
-    stripe_customer_id = business.get("stripe_customer_id")
-    if not stripe_customer_id:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                "https://api.stripe.com/v1/customers",
-                headers=stripe_headers(),
-                data={"email": current_user.user.email, "metadata[business_id]": business["id"]},
-            )
-            customer = r.json()
-            stripe_customer_id = customer["id"]
-            supabase.table("businesses").update({"stripe_customer_id": stripe_customer_id}).eq("id", business["id"]).execute()
-
-    # Create Stripe Checkout session
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            "https://api.stripe.com/v1/checkout/sessions",
-            headers=stripe_headers(),
-            data={
-                "customer": stripe_customer_id,
-                "mode": "subscription",
-                "line_items[0][price]": body.price_id,
-                "line_items[0][quantity]": "1",
-                "subscription_data[trial_period_days]": "7",
-                "success_url": f"{FRONTEND_URL}/?checkout=success",
-                "cancel_url": f"{FRONTEND_URL}/pricing",
-                "metadata[business_id]": business["id"],
-                "metadata[price_id]": body.price_id,
-            },
-        )
-        session = r.json()
-
-    if "error" in session:
-        raise HTTPException(status_code=400, detail=session["error"]["message"])
-
-    return {"url": session["url"]}
-
-@billing_routes.post("/billing/portal")
-async def billing_portal(current_user=Depends(get_current_user)):
-    supabase = get_supabase()
-    biz = supabase.table("businesses").select("stripe_customer_id").eq("user_id", current_user.user.id).execute()
-    if not biz.data or not biz.data[0].get("stripe_customer_id"):
-        raise HTTPException(status_code=404, detail="No billing account found")
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            "https://api.stripe.com/v1/billing_portal/sessions",
-            headers=stripe_headers(),
-            data={"customer": biz.data[0]["stripe_customer_id"], "return_url": f"{FRONTEND_URL}/settings"},
-        )
-        portal = r.json()
-    return {"url": portal["url"]}
 
 @billing_routes.get("/billing/status")
 async def billing_status(current_user=Depends(get_current_user)):
     supabase = get_supabase()
-    biz = supabase.table("businesses").select("plan,member_limit,trial_ends_at,stripe_customer_id,stripe_subscription_id,subscription_status").eq("user_id", current_user.user.id).execute()
-    if not biz.data:
+    business, role, _m = resolve_store(supabase, current_user.user.id)
+    if not business:
         raise HTTPException(status_code=404, detail="Business not found")
-    b = biz.data[0]
-    trial_ends_at = b.get("trial_ends_at")
-    now = datetime.utcnow().isoformat()
-    in_trial = bool(trial_ends_at and trial_ends_at > now)
-    is_active = bool(b.get("plan") or in_trial)
+    owner = str(business["user_id"])
+    account = ent.get_account(supabase, owner)
+
+    # Remember the owner's time zone for monthly counters
+    tz = ent.REQUEST_TIMEZONE.get()
+    if role == "owner" and tz and tz != account.get("timezone"):
+        try:
+            ent.update_account(supabase, owner, {"timezone": ent.account_timezone(None)})
+        except Exception as e:
+            print(f"[billing] couldn't save timezone: {e}")
+
+    plan = account.get("plan") or "free"
+    limits = ent.PLAN_LIMITS[plan]
+    read_only = ent.read_only_store_ids(supabase, owner, account)
+    stores = owned_stores(supabase, owner)
     return {
-        "plan": b.get("plan"),
-        "member_limit": b.get("member_limit", 1),
-        "trial_ends_at": trial_ends_at,
-        "in_trial": in_trial,
-        "is_active": is_active,
-        "has_subscription": bool(b.get("stripe_subscription_id")),
-        "subscription_status": b.get("subscription_status"),
-        "payment_past_due": b.get("subscription_status") == "past_due",
+        "plan": plan,
+        "planName": limits["name"],
+        "price": limits["price"],
+        "features": list(limits["features"]),
+        "limits": {
+            "scansPerMonth": limits["scans_per_month"],
+            "statementUploadsPerMonth": limits["statement_uploads_per_month"],
+            "bankAccounts": limits["bank_accounts"],
+            "teamMembers": limits["team_members"],
+            "includedStores": limits["included_stores"],
+        },
+        "usage": {
+            "scansThisMonth": ent.count_scans_this_month(supabase, owner, account),
+            "statementUploadsThisMonth": ent.count_statement_uploads_this_month(supabase, owner, account),
+            "bankAccounts": ent.count_bank_accounts(supabase, owner),
+            "teamMembers": ent.count_team_members(supabase, owner),
+            "stores": len([s for s in stores if not s.get("archived_at")]),
+        },
+        "extraStorePrice": limits["extra_store_price"],
+        "extraStores": int(account.get("extra_stores") or 0),
+        "readOnlyStoreIds": read_only,
+        "activeStoreReadOnly": business["id"] in read_only,
+        "isOwner": role == "owner",
+        "hasSubscription": bool(account.get("stripe_subscription_id")),
+        "subscriptionStatus": account.get("subscription_status"),
+        "paymentPastDue": account.get("subscription_status") == "past_due",
+        "currentPeriodEnd": account.get("current_period_end"),
+        # kept for older app builds that still read these
+        "is_active": True,
+        "in_trial": False,
+        "trial_ends_at": None,
     }
+
+
+class CheckoutBody(BaseModel):
+    plan: str
+
+
+async def _ensure_customer(supabase, account: dict, current_user) -> str:
+    customer_id = account.get("stripe_customer_id")
+    if customer_id:
+        return customer_id
+    customer = await ent.stripe_request("POST", "customers", {
+        "email": current_user.user.email or "",
+        "metadata[owner_user_id]": current_user.user.id,
+        "metadata[app]": "receiptkept",
+    })
+    ent.update_account(supabase, current_user.user.id, {"stripe_customer_id": customer["id"]})
+    return customer["id"]
+
+
+def _pending_referral_reward(supabase, owner_user_id: str):
+    ids = [b["id"] for b in owned_stores(supabase, owner_user_id)]
+    if not ids:
+        return None
+    rows = (
+        supabase.table("referrals").select("*")
+        .in_("referrer_business_id", ids).eq("reward_type", "pending_coupon")
+        .execute()
+    )
+    pending = [r for r in (rows.data or []) if not r.get("reward_applied")]
+    return pending[0] if pending else None
+
+
+@billing_routes.post("/billing/checkout")
+async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_user)):
+    """Free -> paid opens Stripe Checkout. Paid -> another paid plan changes
+    the existing subscription in place (with proration), including moving
+    the extra-store add-on to the new plan's add-on price."""
+    if body.plan not in ("basic", "growth", "business"):
+        raise HTTPException(status_code=400, detail="Pick Basic, Growth or Business.")
+    price = ent.plan_price_id(body.plan)
+    if not price:
+        raise HTTPException(status_code=503, detail="That plan isn't available yet. Please try again later.")
+
+    supabase = get_supabase()
+    _business, account = _owner_account_or_403(supabase, current_user)
+    owner = current_user.user.id
+    extra = max(0, len(ent.active_owned_stores(supabase, owner)) - 1)
+
+    sub_id = account.get("stripe_subscription_id")
+    if sub_id and account.get("plan") != "free":
+        sub = await ent.stripe_request("GET", f"subscriptions/{sub_id}")
+        data = {"proration_behavior": "create_prorations", "metadata[owner_user_id]": owner, "metadata[plan]": body.plan}
+        i = 0
+        addon_done = False
+        for item in (sub.get("items") or {}).get("data", []):
+            pid = (item.get("price") or {}).get("id")
+            if ent.plan_for_price(pid):
+                data[f"items[{i}][id]"] = item["id"]
+                data[f"items[{i}][price]"] = price
+                i += 1
+            elif ent.is_addon_price(pid):
+                data[f"items[{i}][id]"] = item["id"]
+                if extra > 0:
+                    data[f"items[{i}][price]"] = ent.addon_price_id(body.plan)
+                    data[f"items[{i}][quantity]"] = str(extra)
+                else:
+                    data[f"items[{i}][deleted]"] = "true"
+                addon_done = True
+                i += 1
+        if extra > 0 and not addon_done:
+            data[f"items[{i}][price]"] = ent.addon_price_id(body.plan)
+            data[f"items[{i}][quantity]"] = str(extra)
+        updated = await ent.stripe_request("POST", f"subscriptions/{sub_id}", data)
+        ent.apply_subscription(supabase, updated, owner)
+        return {"updated": True, "plan": body.plan}
+
+    customer_id = await _ensure_customer(supabase, account, current_user)
+    data = {
+        "customer": customer_id,
+        "mode": "subscription",
+        "line_items[0][price]": price,
+        "line_items[0][quantity]": "1",
+        "success_url": f"{FRONTEND_URL}/plans?checkout=success",
+        "cancel_url": f"{FRONTEND_URL}/plans?checkout=canceled",
+        "client_reference_id": owner,
+        "metadata[owner_user_id]": owner,
+        "metadata[plan]": body.plan,
+        "subscription_data[metadata][owner_user_id]": owner,
+        "subscription_data[metadata][plan]": body.plan,
+        "allow_promotion_codes": "true",
+    }
+    if extra > 0:
+        data["line_items[1][price]"] = ent.addon_price_id(body.plan)
+        data["line_items[1][quantity]"] = str(extra)
+    reward = _pending_referral_reward(supabase, owner)
+    if reward:
+        # Stripe allows promotion codes OR discounts, not both
+        data.pop("allow_promotion_codes")
+        data["discounts[0][coupon]"] = REFERRAL_COUPON
+        data["metadata[referral_id]"] = reward["id"]
+    session = await ent.stripe_request("POST", "checkout/sessions", data)
+    return {"url": session["url"]}
+
+
+@billing_routes.post("/billing/portal")
+async def billing_portal(current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    _business, account = _owner_account_or_403(supabase, current_user)
+    if not account.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="You're on the Free plan, so there's no bill to manage yet.")
+    portal = await ent.stripe_request("POST", "billing_portal/sessions", {
+        "customer": account["stripe_customer_id"],
+        "return_url": f"{FRONTEND_URL}/plans",
+    })
+    return {"url": portal["url"]}
+
+
+def verify_stripe_signature(payload: bytes, sig_header: str, secret: str, now: float = None) -> bool:
+    try:
+        parts = {}
+        for part in (sig_header or "").split(","):
+            k, v = part.split("=", 1)
+            parts.setdefault(k.strip(), []).append(v.strip())
+        ts = int(parts.get("t", ["0"])[0])
+    except ValueError:
+        return False
+    if abs((now or time.time()) - ts) > WEBHOOK_TOLERANCE_SECONDS:
+        return False
+    expected = hmac.new(secret.encode(), f"{ts}.".encode() + payload, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, v1) for v1 in parts.get("v1", []))
+
 
 @billing_routes.post("/billing/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
-    sig = request.headers.get("stripe-signature", "")
-
-    # Verify webhook signature if secret is set
-    if STRIPE_WEBHOOK_SECRET:
-        import hmac, hashlib, time
-        parts = {k: v for part in sig.split(",") for k, v in [part.split("=", 1)]}
-        ts = parts.get("t", "0")
-        signed = f"{ts}.{payload.decode()}"
-        expected = hmac.new(STRIPE_WEBHOOK_SECRET.encode(), signed.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, parts.get("v1", "")):
-            raise HTTPException(status_code=400, detail="Invalid signature")
+    secret = webhook_secret()
+    if not secret:
+        print("[billing] webhook secret not configured — rejecting event")
+        raise HTTPException(status_code=500, detail="Webhook not configured")
+    if not verify_stripe_signature(payload, request.headers.get("stripe-signature", ""), secret):
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
     event = json.loads(payload)
     supabase = get_supabase()
+    etype = event.get("type")
+    obj = (event.get("data") or {}).get("object") or {}
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        business_id = session.get("metadata", {}).get("business_id")
-        price_id = session.get("metadata", {}).get("price_id")
-        subscription_id = session.get("subscription")
-        if business_id and price_id in PLANS:
-            plan_info = PLANS[price_id]
-            supabase.table("businesses").update({
-                "plan": plan_info["plan"],
-                "member_limit": plan_info["member_limit"],
-                "stripe_subscription_id": subscription_id,
-                "trial_ends_at": None,
-            }).eq("id", business_id).execute()
+    if etype == "checkout.session.completed" and obj.get("mode") == "subscription":
+        owner = (obj.get("metadata") or {}).get("owner_user_id") or obj.get("client_reference_id")
+        if owner:
+            ent.update_account(supabase, owner, {
+                "stripe_customer_id": obj.get("customer"),
+                "stripe_subscription_id": obj.get("subscription"),
+            })
+            referral_id = (obj.get("metadata") or {}).get("referral_id")
+            if referral_id:
+                supabase.table("referrals").update({"reward_applied": True, "reward_type": "stripe_coupon"}).eq("id", referral_id).execute()
+            if obj.get("subscription"):
+                try:
+                    sub = await ent.stripe_request("GET", f"subscriptions/{obj['subscription']}")
+                    ent.apply_subscription(supabase, sub, owner)
+                except HTTPException as e:
+                    print(f"[billing] couldn't load subscription after checkout: {e.detail}")
 
-    elif event["type"] in ("customer.subscription.deleted", "customer.subscription.paused"):
-        sub = event["data"]["object"]
-        customer_id = sub.get("customer")
-        if customer_id:
-            supabase.table("businesses").update({
-                "plan": None,
-                "member_limit": 1,
-                "stripe_subscription_id": None,
-            }).eq("stripe_customer_id", customer_id).execute()
+    elif etype in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
+        if etype == "customer.subscription.deleted":
+            obj = dict(obj, status="canceled")
+        ent.apply_subscription(supabase, obj)
 
-    elif event["type"] == "customer.subscription.updated":
-        sub = event["data"]["object"]
-        customer_id = sub.get("customer")
-        new_price_id = sub.get("items", {}).get("data", [{}])[0].get("price", {}).get("id")
-        sub_status = sub.get("status")  # active, past_due, canceled, unpaid, etc.
-        if customer_id and new_price_id in PLANS:
-            plan_info = PLANS[new_price_id]
-            update_data = {
-                "plan": plan_info["plan"],
-                "member_limit": plan_info["member_limit"],
-                "subscription_status": sub_status,
-            }
-            supabase.table("businesses").update(update_data).eq("stripe_customer_id", customer_id).execute()
+    elif etype in ("invoice.paid", "invoice.payment_succeeded"):
+        customer = obj.get("customer")
+        if customer:
+            supabase.table("rv_accounts").update({"subscription_status": "active"}).eq("stripe_customer_id", customer).execute()
 
-    elif event["type"] == "invoice.payment_failed":
-        invoice = event["data"]["object"]
-        customer_id = invoice.get("customer")
-        if customer_id:
-            # Don't revoke access immediately — Stripe will retry per its settings.
-            # Just flag the account so the UI can show a payment-issue warning.
-            supabase.table("businesses").update({
-                "subscription_status": "past_due",
-            }).eq("stripe_customer_id", customer_id).execute()
+    elif etype == "invoice.payment_failed":
+        customer = obj.get("customer")
+        if customer:
+            # Stripe retries per its settings; just flag it so the app can warn.
+            supabase.table("rv_accounts").update({"subscription_status": "past_due"}).eq("stripe_customer_id", customer).execute()
 
-    elif event["type"] == "invoice.payment_succeeded":
-        invoice = event["data"]["object"]
-        customer_id = invoice.get("customer")
-        if customer_id:
-            # Clear any past_due flag once payment goes through
-            supabase.table("businesses").update({
-                "subscription_status": "active",
-            }).eq("stripe_customer_id", customer_id).execute()
+    elif etype == "financial_connections.account.refreshed_transactions":
+        try:
+            from routes.receiptvault.connect_routes import handle_refreshed_transactions
+            await handle_refreshed_transactions(supabase, obj)
+        except ModuleNotFoundError:
+            pass
 
     return {"ok": True}

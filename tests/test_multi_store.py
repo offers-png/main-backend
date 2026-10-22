@@ -1,10 +1,27 @@
 """Phase 1: one owner, several stores, no data leaking between them."""
 
+import pytest
+
 from conftest import as_user
 
 OWNER = "11111111-1111-1111-1111-111111111111"
 OTHER = "22222222-2222-2222-2222-222222222222"
 MEMBER = "33333333-3333-3333-3333-333333333333"
+
+
+@pytest.fixture
+def paid_owner(db, monkeypatch):
+    """Phase 1 tests run on the Business plan (multi-store + team); billing
+    itself is covered in test_billing.py."""
+    from routes.receiptvault import entitlements
+
+    async def no_stripe(supabase, owner_user_id):
+        return None
+
+    monkeypatch.setattr(entitlements, "sync_store_addon_quantity", no_stripe)
+    db.tables.setdefault("rv_accounts", []).append({
+        "owner_user_id": OWNER, "plan": "business", "extra_stores": 5, "stripe_subscription_id": "sub_test",
+    })
 
 
 def make_first_store(client, user=OWNER, name="Store A"):
@@ -29,7 +46,7 @@ def money_in(client, store_id, amount, user=OWNER):
     assert r.status_code == 200, r.text
 
 
-def test_owner_creates_three_stores_and_data_never_leaks(client):
+def test_owner_creates_three_stores_and_data_never_leaks(client, paid_owner):
     a = make_first_store(client)
     b = add_store(client, "Store B")
     c = add_store(client, "Store C")
@@ -91,7 +108,7 @@ def test_existing_single_store_account_works_without_header(client, db):
     assert client.get("/api/business", headers=as_user(OWNER)).json()["id"] == a
 
 
-def test_team_member_scoped_to_their_store(client, db):
+def test_team_member_scoped_to_their_store(client, db, paid_owner):
     a = make_first_store(client)
     b = add_store(client, "Store B")
     db.tables.setdefault("business_users", []).append({
@@ -107,7 +124,7 @@ def test_team_member_scoped_to_their_store(client, db):
     assert r.status_code == 400
 
 
-def test_team_invites_go_to_the_active_store(client, db):
+def test_team_invites_go_to_the_active_store(client, db, paid_owner):
     a = make_first_store(client)
     b = add_store(client, "Store B")
     r = client.post("/api/team/invite", json={"email": "new@test.com", "role": "employee", "modules": ["receipts"]}, headers=as_user(OWNER, b))

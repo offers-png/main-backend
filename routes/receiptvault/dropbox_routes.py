@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from supabase import create_client
 
-from routes.receiptvault.routes import get_current_user, resolve_role, resolve_module_access
+from routes.receiptvault.routes import get_current_user, resolve_role, resolve_module_access, plan_feature, require_writable_store
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -91,7 +91,7 @@ class GenerateDropboxBody(BaseModel):
     label: Optional[str] = None
 
 
-@dropbox_routes.post("/generate")
+@dropbox_routes.post("/generate", dependencies=[Depends(require_writable_store), Depends(plan_feature("accountant"))])
 async def generate_dropbox_link(body: GenerateDropboxBody, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business, role = resolve_role(supabase, current_user.user.id)

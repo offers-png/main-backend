@@ -25,11 +25,6 @@ ADMIN_NOTIFICATION_EMAIL = os.getenv("ADMIN_NOTIFICATION_EMAIL", "saleh852@gmail
 # here would create a circular import.
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 
-# A special, non-customer referral code Saleh can hand out directly (texts,
-# DMs, in person) that gives the NEW signup an extended 30-day trial instead
-# of the standard 7 days. Unlike a normal referral code, this isn't tied to
-# any business and rewards nobody — it's a straight promo for the signup.
-FOUNDER_PROMO_CODE = "TRY30"
 
 receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
@@ -132,32 +127,38 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 
-async def require_active_subscription(current_user=Depends(get_current_user)):
-    """Hard-lockout gate. Raises 402 if the business has no paid plan and
-    no active trial. Applies to the business the CURRENT user belongs to —
-    whether they're the owner or a team member — since team members don't
-    have their own billing state, only the owner's business does.
-
-    Deliberately permissive if no business is found yet (e.g. a team
-    member mid-invite-acceptance, or a stale token) — that's a 404
-    elsewhere, not a billing problem, so we let it pass through here.
-    """
+async def require_active_subscription(request: Request, current_user=Depends(get_current_user)):
+    """Store gate (replaces the old trial lockout — free accounts never hit
+    a wall). Reading is always allowed; changes are blocked only on a store
+    that is view-only because the owner's plan doesn't pay for it (e.g. 3
+    stores after downgrading to Free) or because it's archived."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    from routes.receiptvault.entitlements import check_store_writable
     supabase = get_supabase()
-    business, _role = resolve_role(supabase, current_user.user.id)
+    business, role = resolve_role(supabase, current_user.user.id)
     if business is None:
         return
-    # Billing is per owner account: read it from the owner's first store,
-    # so every extra store rides on the same plan.
-    from routes.receiptvault.stores import owned_stores
-    first = (owned_stores(supabase, business["user_id"]) or [business])[0]
-    plan = first.get("plan")
-    trial_ends_at = first.get("trial_ends_at")
-    in_trial = bool(trial_ends_at and trial_ends_at > datetime.utcnow().isoformat())
-    if not plan and not in_trial:
-        raise HTTPException(
-            status_code=402,
-            detail="Your free trial has ended. Subscribe to keep using ReceiptVault.",
-        )
+    check_store_writable(supabase, business, role)
+
+
+require_writable_store = require_active_subscription
+
+
+def plan_feature(feature: str, writes_only: bool = False):
+    """Dependency: the active store's owner plan must include `feature`.
+    writes_only=True lets people still VIEW old data after a downgrade
+    (e.g. invoices) while blocking new changes."""
+    async def dep(request: Request, current_user=Depends(get_current_user)):
+        if writes_only and request.method in ("GET", "HEAD", "OPTIONS"):
+            return
+        from routes.receiptvault.entitlements import require_feature
+        supabase = get_supabase()
+        business, role = resolve_role(supabase, current_user.user.id)
+        if business is None:
+            return
+        require_feature(supabase, business, feature, role)
+    return dep
 
 
 def to_business(row: dict, referral_count: int = 0) -> dict:
@@ -440,53 +441,30 @@ def generate_referral_code(supabase) -> str:
 
 
 async def apply_referral_reward(supabase, referrer: dict):
-    """Rewards the REFERRER (not the new signup) with 1 month free, for
-    each friend who signs up with their code. If they're still in trial
-    (or between trial and paying), just extend trial_ends_at by 30 days —
-    no billing system involved yet. If they're already a paying subscriber,
-    attach a one-time 100%-off coupon to their next invoice instead, since
-    their access is controlled by Stripe at that point, not trial_ends_at.
-    """
-    reward_type = None
-
-    if referrer.get("plan") and referrer.get("stripe_subscription_id"):
-        # Paying customer — apply a one-time free-month coupon to their
-        # existing subscription. Requires the coupon "referral-1-month-free"
-        # (100% off, duration=once) to already exist in the Stripe account.
+    """Rewards the REFERRER (not the new signup) with 1 month free for each
+    friend who signs up with their code. Paying owners get a one-time
+    100%-off coupon on their subscription now; Free owners get it saved as
+    'pending_coupon' and applied automatically when they subscribe.
+    Requires the coupon "referral-1-month-free" (100% off, duration=once)
+    to exist in Stripe."""
+    from routes.receiptvault.entitlements import get_account
+    account = get_account(supabase, str(referrer["user_id"]))
+    sub_id = account.get("stripe_subscription_id")
+    if account.get("plan") != "free" and sub_id:
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                f"https://api.stripe.com/v1/subscriptions/{referrer['stripe_subscription_id']}",
+                f"https://api.stripe.com/v1/subscriptions/{sub_id}",
                 headers={
                     "Authorization": f"Bearer {STRIPE_SECRET_KEY}",
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
-                data={"discounts[0][coupon]": "referral-1-month-free"},
+                data={"discounts[0][coupon]": os.getenv("STRIPE_REFERRAL_COUPON", "referral-1-month-free")},
             )
-            if r.status_code >= 400:
-                # Don't let a Stripe hiccup block the referred signup itself —
-                # log it so it can be applied manually, rather than raising.
-                print(f"[referral] Failed to apply Stripe coupon for business {referrer['id']}: {r.text}")
-            else:
-                reward_type = "stripe_coupon"
-    else:
-        # In trial (or trial already lapsed) — extend from whichever is
-        # later: their current trial end, or right now. This handles both
-        # "still in trial" (stacks on top) and "trial already ended"
-        # (starts a fresh 30 days from today) correctly.
-        current_trial_end = referrer.get("trial_ends_at")
-        base = datetime.utcnow()
-        if current_trial_end:
-            try:
-                parsed = datetime.fromisoformat(current_trial_end.replace("Z", "+00:00")).replace(tzinfo=None)
-                if parsed > base:
-                    base = parsed
-            except ValueError:
-                pass
-        new_trial_end = (base + timedelta(days=30)).isoformat()
-        supabase.table("businesses").update({"trial_ends_at": new_trial_end}).eq("id", referrer["id"]).execute()
-        reward_type = "trial_extension"
-
-    return reward_type
+            if r.status_code < 400:
+                return "stripe_coupon"
+            # Don't block the referred signup over a Stripe hiccup
+            print(f"[referral] Failed to apply Stripe coupon for business {referrer['id']}: {r.text}")
+    return "pending_coupon"
 
 
 @receipt_routes.post("/setup/business")
@@ -534,17 +512,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
         if active_store is not None:
             raise HTTPException(status_code=403, detail="Only the business owner can edit the business profile.")
         # Brand new user with no business and no team membership — normal
-        # first-time signup flow. They become the owner of a new business.
-        # Start their 7-day trial now — without this, a fresh signup would
-        # have no plan and no trial, and hard-lockout enforcement would
-        # block them before they ever got to use the product.
-        #
-        # Exception: Saleh's own founder promo code extends the new
-        # signup's OWN trial to 30 days instead of 7. Unlike a normal
-        # referral code, nobody gets rewarded for this one — it's not
-        # tied to any business, it's a straight incentive to try longer.
-        is_founder_promo = bool(body.referralCode) and body.referralCode.strip().upper() == FOUNDER_PROMO_CODE
-        trial_days = 30 if is_founder_promo else 7
+        # first-time signup flow. They become the owner of a new business
+        # on the Free plan (no trial: Free never expires).
         data = {
             "user_id": user_id,
             "business_name": body.businessName,
@@ -552,7 +521,6 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             "owner_name": body.ownerName,
             "owner_address": body.ownerAddress,
             "owner_email": current_user.user.email,
-            "trial_ends_at": (datetime.utcnow() + timedelta(days=trial_days)).isoformat(),
             "referral_code": generate_referral_code(supabase),
         }
         if body.taxId is not None:
@@ -572,11 +540,9 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
 
         # If they signed up via someone's referral link, validate the code
         # and reward the referrer — never the new signup. Silently ignore
-        # invalid/unknown codes rather than blocking signup over it. The
-        # founder promo code is handled above, not here — it's not a real
-        # referrer, so it never reaches this lookup.
+        # invalid/unknown codes rather than blocking signup over it.
         referrer = None
-        if body.referralCode and not is_founder_promo:
+        if body.referralCode:
             referrer_lookup = (
                 supabase.table("businesses").select("*").eq("referral_code", body.referralCode.strip().upper()).execute()
             )
@@ -585,6 +551,8 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
                 data["referred_by_code"] = body.referralCode.strip().upper()
 
         result = supabase.table("businesses").insert(data).execute()
+        from routes.receiptvault.entitlements import get_account
+        get_account(supabase, user_id)  # owner's billing account, on Free
 
         # Notify Saleh directly whenever a new business signs up — without
         # this, the only way to know is checking the database by hand,
@@ -595,30 +563,28 @@ async def setup_business(body: BusinessProfileBody, current_user=Depends(get_cur
             try:
                 await _send_email(
                     to=ADMIN_NOTIFICATION_EMAIL,
-                    subject=f"New ReceiptVault signup: {body.businessName}",
+                    subject=f"New ReceiptKept signup: {body.businessName}",
                     html=_wrap(f"""
                     <p><b>{body.businessName}</b> just signed up.</p>
                     <p>Owner: {body.ownerName}<br>
                     Email: {current_user.user.email}<br>
-                    Trial: {trial_days} days{' (founder promo)' if is_founder_promo else ''}</p>
+                    Plan: Free</p>
                     """),
                 )
             except Exception as e:
                 print(f"[signup] admin notification failed: {e}")
 
-            # Welcome email to the customer themselves — right now signup is
-            # total silence until the day-5 trial reminder, five days later.
-            # Kept deliberately simple: no jargon, one thing to do next
+            # Welcome email to the customer themselves. Kept deliberately simple: no jargon, one thing to do next
             # (scan a receipt), matching the same zero-effort framing as the
             # rest of the app. Same fire-and-forget rule: never block signup.
             try:
                 await _send_email(
                     to=current_user.user.email,
-                    subject="Welcome to ReceiptVault",
+                    subject="Welcome to ReceiptKept",
                     html=_wrap(f"""
                     <p>Hi {body.ownerName or 'there'},</p>
-                    <p><b>{body.businessName}</b> is set up and your {trial_days}-day free trial has started.</p>
-                    <p>Take a photo of a receipt and ReceiptVault handles the rest &mdash; no typing, no
+                    <p><b>{body.businessName}</b> is set up on the Free plan &mdash; 10 receipt scans a month, free forever.</p>
+                    <p>Take a photo of a receipt and ReceiptKept handles the rest &mdash; no typing, no
                     spreadsheets, no learning curve.</p>
                     <a href="{FRONTEND_URL}" style="display:inline-block;background:#1a6b3a;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Scan Your First Receipt</a>
                     """),
@@ -832,6 +798,9 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "receipts")
     business_id = business["id"]
+    from routes.receiptvault.entitlements import check_scan_allowed
+    _b, uploader_role_for_limit = resolve_role(supabase, current_user.user.id)
+    check_scan_allowed(supabase, business, uploader_role_for_limit)
 
     supabase_url = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
     content_type = request.headers.get("content-type", "")
@@ -923,7 +892,7 @@ async def delete_receipt(receipt_id: str, current_user=Depends(get_current_user)
 
 
 
-@receipt_routes.post("/resend-all", dependencies=[Depends(require_active_subscription)])
+@receipt_routes.post("/resend-all", dependencies=[Depends(require_active_subscription), Depends(plan_feature("accountant"))])
 async def resend_all(current_user=Depends(get_current_user)):
     """Mark all receipts as unsent then send them again."""
     supabase = get_supabase()
@@ -1033,7 +1002,7 @@ async def resend_all(current_user=Depends(get_current_user)):
     asyncio.create_task(send_in_background())
     return {"ok": True, "sent": sent_count, "status": "sending"}
 
-@receipt_routes.post("/send-now", dependencies=[Depends(require_active_subscription)])
+@receipt_routes.post("/send-now", dependencies=[Depends(require_active_subscription), Depends(plan_feature("accountant"))])
 async def send_now(current_user=Depends(get_current_user)):
     import asyncio
     supabase = get_supabase()

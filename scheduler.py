@@ -193,9 +193,17 @@ async def run_scheduled_sends():
     print(f"[scheduler] tick — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     try:
         supabase = get_supabase()
+        from routes.receiptvault.entitlements import get_account, has_feature, read_only_store_ids
         bizzes = supabase.table("businesses").select("*").eq("send_enabled", 1).execute()
         for biz in (bizzes.data or []):
             if not biz.get("accountant_email"):
+                continue
+            # Auto-send to the accountant is a Basic-and-up feature, and
+            # view-only (unpaid extra / archived) stores don't send.
+            account = get_account(supabase, str(biz["user_id"]))
+            if not has_feature(account, "accountant"):
+                continue
+            if biz["id"] in read_only_store_ids(supabase, str(biz["user_id"]), account):
                 continue
             if should_send_today(biz):
                 await send_for_business(biz)

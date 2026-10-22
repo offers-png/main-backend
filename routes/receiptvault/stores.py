@@ -130,7 +130,7 @@ def list_stores_for_user(supabase, user_id: str) -> list:
     seen = set()
     for b in owned_stores(supabase, user_id):
         seen.add(b["id"])
-        out.append({"id": b["id"], "businessName": b.get("business_name"), "role": "owner", "createdAt": str(b.get("created_at") or "")})
+        out.append({"id": b["id"], "businessName": b.get("business_name"), "role": "owner", "createdAt": str(b.get("created_at") or ""), "archived": bool(b.get("archived_at"))})
     for m in memberships(supabase, user_id):
         if m["business_id"] in seen:
             continue
@@ -138,5 +138,5 @@ def list_stores_for_user(supabase, user_id: str) -> list:
         if not biz:
             continue
         seen.add(biz["id"])
-        out.append({"id": biz["id"], "businessName": biz.get("business_name"), "role": m.get("role") or "employee", "createdAt": str(biz.get("created_at") or "")})
+        out.append({"id": biz["id"], "businessName": biz.get("business_name"), "role": m.get("role") or "employee", "createdAt": str(biz.get("created_at") or ""), "archived": bool(biz.get("archived_at"))})
     return out

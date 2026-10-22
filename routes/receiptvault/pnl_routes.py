@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import create_client
 
-from routes.receiptvault.routes import get_current_user, resolve_module_access, SCHEDULE_C_LINES
+from routes.receiptvault.routes import get_current_user, resolve_module_access, plan_feature
 from routes.receiptvault.money_routes import CATEGORY_LABELS
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
@@ -187,7 +187,7 @@ def _current_estimated_tax_period(today: date):
     return date(year, 9, 1), date(year, 12, 31), f"Q4 {year}", date(year + 1, 1, 15)
 
 
-@pnl_routes.get("/tax/quarterly-estimate")
+@pnl_routes.get("/tax/quarterly-estimate", dependencies=[Depends(plan_feature("tax"))])
 async def get_quarterly_tax_estimate(
     start: Optional[str] = None,
     end: Optional[str] = None,
