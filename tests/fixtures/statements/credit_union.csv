@@ -1,0 +1,3 @@
+Transaction ID,Posting Date,Effective Date,Transaction Type,Transaction Amount,Check Number,Reference Number,Description,Transaction Category,Type,Balance
+1,10/2/2026,10/2/2026,Debit,-55.00,,,ACE HARDWARE,,,945.00
+2,10/3/2026,10/3/2026,Credit,300.00,,,ATM DEPOSIT,,,1245.00

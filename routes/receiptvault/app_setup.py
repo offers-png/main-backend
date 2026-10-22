@@ -16,6 +16,7 @@ from routes.receiptvault.pnl_routes import pnl_routes
 from routes.receiptvault.dropbox_routes import dropbox_routes, tax_payments_routes, feedback_routes
 from routes.receiptvault.store_routes import store_routes
 from routes.receiptvault.bank_routes import bank_routes
+from routes.receiptvault.statement_routes import statement_routes
 
 
 def register_receiptkept(app: FastAPI):
@@ -40,5 +41,6 @@ def register_receiptkept(app: FastAPI):
     # Matching, sorting and the Personal button are Basic and up; the list
     # itself stays viewable after a downgrade.
     app.include_router(bank_routes, dependencies=paid("auto_categorize"))
+    app.include_router(statement_routes, dependencies=paid("statement_upload"))
     # Feedback is never gated — it must work for everyone.
     app.include_router(feedback_routes)

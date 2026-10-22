@@ -1,0 +1,11 @@
+Description,,Summary Amt.
+Beginning balance as of 10/01/2026,,"1,000.00"
+Total credits,,"2,000.00"
+Total debits,,"-410.00"
+Ending balance as of 10/31/2026,,"2,590.00"
+
+Date,Description,Amount,Running Bal.
+10/01/2026,Beginning balance as of 10/01/2026,,"1,000.00"
+10/02/2026,"SYSCO FOODS 123 DES:PAYMENT","-210.00","790.00"
+10/05/2026,"VERIZON WIRELESS DES:PAYMENTS","-200.00","590.00"
+10/06/2026,"CLOVER DEPOSIT","2,000.00","2,590.00"

@@ -322,7 +322,7 @@ def count_statement_uploads_this_month(supabase, owner_user_id: str, account: Op
     try:
         rows = (
             supabase.table("rv_statement_uploads").select("id", count="exact")
-            .in_("business_id", ids).gte("created_at", since)
+            .in_("business_id", ids).eq("status", "imported").gte("imported_at", since)
             .execute()
         )
     except Exception:
