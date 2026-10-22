@@ -192,6 +192,9 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
         "client_reference_id": owner,
         "metadata[owner_user_id]": owner,
         "metadata[plan]": body.plan,
+        # Lets other apps' webhooks on this Stripe account skip ReceiptKept sessions
+        "metadata[app]": "receiptkept",
+        "subscription_data[metadata][app]": "receiptkept",
         "subscription_data[metadata][owner_user_id]": owner,
         "subscription_data[metadata][plan]": body.plan,
         "allow_promotion_codes": "true",

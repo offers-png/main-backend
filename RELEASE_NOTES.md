@@ -149,6 +149,29 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
 - No secrets in the front-end bundle or current files. See "Must do" below
   about an old key in git history.
 
+## Stripe test mode — done 2026-10-22 (account "aisalai", sandbox)
+
+- Products + prices created by `scripts/stripe_setup_receiptkept.py` (a second
+  run reuses them): Basic `price_1UTVjCHDiwSWl43optVD0YtQ`, Growth
+  `price_1UTVjDHDiwSWl43o1WlpCu3t`, Business `price_1UTVjEHDiwSWl43oeogvpn0W`,
+  extra store Basic `price_1UTVjFHDiwSWl43o8awpASo9`, Growth
+  `price_1UTVjGHDiwSWl43ocbD134DN`, Business `price_1UTVjIHDiwSWl43oZelpeG0P`;
+  coupon `referral-1-month-free`.
+- Webhook endpoint `we_1UTVjeHDiwSWl43oJxy4lmhV` →
+  `https://main-backend-k32m.onrender.com/api/billing/webhook` (7 events).
+- Customer portal default configuration `bpc_1UTVk7HDiwSWl43okMuRwcqk`
+  (card update, invoices, cancel at period end).
+- Full flow run against real Stripe test mode (new backend code run locally
+  with an in-memory database; webhooks forwarded by the Stripe CLI): Free →
+  Basic via real Checkout with 4242 4242 4242 4242 → Growth → Business → add
+  a store → downgrade to Basic → cancel. **33/33 checks passed**, all 8
+  webhooks returned 200. Stripe API version on the account: 2025-12-15.clover.
+- Upgrades are prorated onto the NEXT bill (Stripe `create_prorations`), not
+  charged immediately. Change to `always_invoice` if you want the difference
+  charged on the spot.
+- Until the new backend is deployed, Render answers test events with errors
+  (old code); Stripe retries for up to 3 days and may email you about it.
+
 ## Must do before going live (owner)
 
 1. **Rotate the Supabase service-role key if it hasn't been done since July.**
@@ -157,7 +180,7 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
    file. Anyone with it has full access to the shared database. Rotate it in
    Supabase (Settings → API / JWT keys) and update `SUPABASE_SERVICE_KEY` on
    Render.
-2. **Stripe (test mode first):**
+2. **Stripe** (test mode is set up — see above; still to do for live):
    - `STRIPE_SECRET_KEY=sk_test_... python scripts/stripe_setup_receiptkept.py`
      (backend repo). It creates the 3 plans + 3 extra-store prices and the
      `referral-1-month-free` coupon, and prints the price env vars.
@@ -213,6 +236,13 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
 - **Money Box vs bank charges:** a vendor paid by card and ALSO typed into
   Money Box will show twice. Owners can tap "Already counted" on the bank
   charge. Automatic matching of Money Box entries wasn't in scope.
+- **Other app's Stripe webhook:** `/api/webhook` (the API-key checkout app on
+  the same backend) handles EVERY paid `checkout.session.completed` on the
+  Stripe account and creates an API key for it. In live mode it would mint a
+  never-expiring key for each ReceiptKept checkout. ReceiptKept sessions now
+  carry `metadata.app = "receiptkept"`; add one line to that handler to skip
+  them (`if session.get("metadata", {}).get("app") == "receiptkept": return`)
+  before going live. (Not changed here — it's another app's code.)
 - **Other-app check limits:** it finds a person by user id (uuid columns and
   text columns named like user/owner/member/author/created_by/uid), by email
   columns, and by files they own. An app that stores people only by phone

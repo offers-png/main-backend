@@ -453,8 +453,9 @@ def check_store_writable(supabase, business: dict, role: str = "owner"):
     elif role == "owner":
         nxt = account.get("plan") if account.get("plan") != "free" else "basic"
         p = PLAN_LIMITS[nxt]
+        n = allowed_store_count(account)
         msg = (
-            f"Your plan pays for {allowed_store_count(account)} store(s), so this one is view-only. "
+            f"Your plan pays for {n} store{'' if n == 1 else 's'}, so this one is view-only. "
             f"Add it to your plan (${p['extra_store_price']:.2f}/month on {p['name']}) or archive an extra store in Settings."
         )
     else:
