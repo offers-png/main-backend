@@ -118,12 +118,20 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
   its records and uploaded files, removes team members and the billing
   account, and takes the person off any teams they're on. Other people's
   stores are never touched.
-- The Supabase **login itself is kept by default**, because it's shared by
-  every app in this Supabase project. Set `RK_DELETE_AUTH_LOGIN=true` on
-  Render to delete the login too.
+- The shared Supabase **login is deleted too only if the person has no data
+  in any other app** in this Supabase project. The database function
+  `rv_user_other_app_data()` (backend-only) looks for their user id in every
+  non-ReceiptKept table, their email in email columns, and files they own in
+  other storage buckets. If it finds anything, or the check fails, only the
+  ReceiptKept data is deleted and the login stays.
+- **Saleh's account can never be deleted this way**: user
+  `83055487-…` and the emails saleh852@gmail.com / offers@dealdily.com are
+  built into the code (by id and by email, any letter case). The env vars
+  `RK_PROTECTED_EMAILS` / `RK_PROTECTED_USER_IDS` can add more, never remove.
+- Privacy policy updated to say exactly this (version 2026-10-22).
 
 ### 8. Verification
-- Backend: 54 automated tests (in-memory database fake; no network) covering
+- Backend: 60 automated tests (in-memory database fake; no network) covering
   store isolation, entitlements/limits, billing flow and webhooks, dedupe,
   vendor rules, matching, personal exclusion, statement parsing for 10 bank
   layouts, bank connection, email forwarding, CSV export, and one end-to-end
@@ -179,7 +187,7 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
    - `RESEND_API_KEY`, `RESEND_INBOUND_WEBHOOK_SECRET`, optional
      `INBOUND_EMAIL_DOMAIN` (default `in.receiptkept.com`)
    - optional `PDFSHIFT_API_KEY` (forwarded emails with no attachment become PDFs)
-   - optional `RK_DELETE_AUTH_LOGIN=true` ("Delete my account" also deletes the shared Supabase login)
+   - optional `RK_PROTECTED_EMAILS` / `RK_PROTECTED_USER_IDS` (extra accounts that can never be deleted)
    - `FRONTEND_URL=https://receiptkept.com` (several emails still default to
      the old receipts.dealdily.com when this isn't set)
    - existing: `SUPABASE_SERVICE_KEY`, `ANTHROPIC_API_KEY`, `EMAIL_RELAY_SECRET`, `TELNYX_API_KEY`
@@ -205,9 +213,12 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
 - **Money Box vs bank charges:** a vendor paid by card and ALSO typed into
   Money Box will show twice. Owners can tap "Already counted" on the bank
   charge. Automatic matching of Money Box entries wasn't in scope.
-- **Privacy policy wording:** it says deleting the account deletes "your
-  account record". With the default (login kept, all ReceiptKept data
-  deleted) that's true of the ReceiptKept account but not the shared login.
-  Either set `RK_DELETE_AUTH_LOGIN=true` or adjust the policy wording.
+- **Other-app check limits:** it finds a person by user id (uuid columns and
+  text columns named like user/owner/member/author/created_by/uid), by email
+  columns, and by files they own. An app that stores people only by phone
+  number or inside JSON fields wouldn't be detected, so a login used only
+  there could be deleted. All apps checked today store users by id or email.
+- Deleting the login needs the backend to run with the service-role key (it
+  does on Render). Without it the login is simply kept.
 - The legacy Express `server/` folder in the front-end repo is unused (the app
   talks to the FastAPI backend); only its category list was updated.

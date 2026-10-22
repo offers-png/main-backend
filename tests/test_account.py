@@ -112,10 +112,64 @@ def test_team_member_delete_leaves_the_store(client, db, paid_owner):
     assert any(x["id"] == a for x in db.tables["businesses"])
 
 
-def test_login_deleted_only_when_switched_on(client, db, paid_owner, monkeypatch):
+class FakeAuth:
+    def __init__(self):
+        self.deleted = []
+        self.admin = SimpleNamespace(delete_user=self.deleted.append)
+
+
+def delete(client, user, email=None):
+    return client.request("DELETE", "/api/account", json={"confirm": "DELETE"}, headers=as_user(user, email=email))
+
+
+def test_login_deleted_when_no_other_app_data(client, db, paid_owner):
     seed(client, db, paid_owner)
-    deleted = []
-    db.auth = SimpleNamespace(admin=SimpleNamespace(delete_user=lambda uid: deleted.append(uid)))
-    monkeypatch.setenv("RK_DELETE_AUTH_LOGIN", "true")
-    res = client.request("DELETE", "/api/account", json={"confirm": "DELETE"}, headers=as_user(MEMBER))
-    assert res.json()["loginDeleted"] is True and deleted == [MEMBER]
+    db.auth = FakeAuth()
+    seen = []
+    db.rpc_handlers["rv_user_other_app_data"] = lambda p: seen.append(p) or []
+    res = delete(client, OWNER).json()
+    assert res["loginDeleted"] is True and res["loginKeptBecause"] is None
+    assert db.auth.deleted == [OWNER]
+    assert seen == [{"p_user_id": OWNER, "p_email": f"{OWNER}@test.com"}]
+
+
+def test_login_kept_when_person_uses_another_app(client, db, paid_owner):
+    seed(client, db, paid_owner)
+    db.auth = FakeAuth()
+    db.rpc_handlers["rv_user_other_app_data"] = lambda p: ["public.listingai_users"]
+    res = delete(client, OWNER).json()
+    assert res["storesDeleted"] == 2  # ReceiptKept data is still deleted
+    assert res["loginDeleted"] is False and res["loginKeptBecause"] == "other_apps"
+    assert db.auth.deleted == []
+    assert not [b for b in db.tables["businesses"] if b["user_id"] == OWNER]
+
+
+def test_login_kept_when_the_check_fails(client, db, paid_owner):
+    seed(client, db, paid_owner)
+    db.auth = FakeAuth()  # no rpc handler -> the check errors
+    res = delete(client, OWNER).json()
+    assert res["loginDeleted"] is False and res["loginKeptBecause"] == "check_failed"
+    assert db.auth.deleted == []
+
+
+@pytest.mark.parametrize("user,email", [
+    ("83055487-c8eb-4531-92b4-04276ad4e14c", "someone-else@example.com"),  # by id, even with another email
+    ("aaaaaaaa-0000-0000-0000-000000000001", "Saleh852@Gmail.com"),       # by email, any case
+    ("aaaaaaaa-0000-0000-0000-000000000002", "offers@dealdily.com"),
+])
+def test_saleh_can_never_be_deleted(client, db, user, email, monkeypatch):
+    s = make_first_store(client, user=user, name="Saleh's store")
+    db.auth = FakeAuth()
+    db.rpc_handlers["rv_user_other_app_data"] = lambda p: []
+    monkeypatch.setenv("RK_PROTECTED_EMAILS", "")    # settings can't remove the built-in list
+    monkeypatch.setenv("RK_PROTECTED_USER_IDS", "")
+    res = delete(client, user, email=email)
+    assert res.status_code == 403 and "protected" in res.json()["detail"]
+    assert any(b["id"] == s for b in db.tables["businesses"]) and db.auth.deleted == []
+
+
+def test_env_can_add_protected_accounts(client, db, paid_owner, monkeypatch):
+    seed(client, db, paid_owner)
+    monkeypatch.setenv("RK_PROTECTED_EMAILS", "manager@shop.com, x@y.com")
+    assert delete(client, MEMBER, email="Manager@Shop.com").status_code == 403
+    assert delete(client, OWNER).status_code == 200  # everyone else still can

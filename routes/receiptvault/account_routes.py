@@ -10,9 +10,16 @@ and the records they personally added stay with the store they belong to
 (the store's books are the owner's), so for them export = their own entries
 and delete = leave every team.
 
-The Supabase login is SHARED with other apps in the same project, so by
-default delete removes all ReceiptKept data but keeps the login itself.
-Set RK_DELETE_AUTH_LOGIN=true to also delete the login.
+The Supabase login is SHARED with the owner's other apps in this project.
+After the ReceiptKept data is gone, the login is deleted too ONLY if the
+database function rv_user_other_app_data() finds no trace of the person in
+any other app (their user id, or their email, in any non-ReceiptKept table,
+or files they own in another storage bucket). If it finds anything — or the
+check itself fails — the login is kept and only ReceiptKept data is deleted.
+
+Protected accounts (the owner of ReceiptKept) can never be deleted here:
+see PROTECTED_EMAILS / PROTECTED_USER_IDS. The env vars RK_PROTECTED_EMAILS
+and RK_PROTECTED_USER_IDS (comma-separated) can only ADD to these lists.
 """
 
 import csv
@@ -34,6 +41,34 @@ from routes.receiptvault import entitlements as ent
 account_routes = APIRouter(prefix="/api", tags=["account"])
 
 BUCKET_MARKER = "/storage/v1/object/public/receipts/"
+
+# Saleh's own accounts. Built in on purpose so no setting can remove them.
+PROTECTED_EMAILS = {"saleh852@gmail.com", "offers@dealdily.com"}
+PROTECTED_USER_IDS = {"83055487-c8eb-4531-92b4-04276ad4e14c"}
+
+
+def _env_set(name: str) -> set:
+    return {v.strip().lower() for v in os.getenv(name, "").split(",") if v.strip()}
+
+
+def is_protected(user_id: Optional[str], email: Optional[str]) -> bool:
+    ids = PROTECTED_USER_IDS | _env_set("RK_PROTECTED_USER_IDS")
+    emails = PROTECTED_EMAILS | _env_set("RK_PROTECTED_EMAILS")
+    return str(user_id or "").lower() in ids or (email or "").strip().lower() in emails
+
+
+def other_app_data(supabase, user_id: str, email: Optional[str]) -> Optional[list]:
+    """Tables in the user's OTHER apps that hold their data ([] = none).
+    None means the check couldn't run — callers must then keep the login."""
+    try:
+        res = supabase.rpc("rv_user_other_app_data", {"p_user_id": user_id, "p_email": email or ""}).execute()
+    except Exception as e:
+        print(f"[account] other-app check failed: {e}")
+        return None
+    data = res.data
+    if data is None or not isinstance(data, list):
+        return None
+    return data
 
 # table -> columns never included in an export (secrets / internal links)
 REDACT = {
@@ -238,8 +273,11 @@ def _delete_store(supabase, business: dict) -> dict:
 async def delete_account(body: DeleteBody, current_user=Depends(get_current_user)):
     if (body.confirm or "").strip().upper() != "DELETE":
         raise HTTPException(status_code=400, detail='Type DELETE to confirm.')
-    supabase = get_supabase()
     uid = current_user.user.id
+    if is_protected(uid, current_user.user.email):
+        print(f"[account] refused delete for protected account {uid}")
+        raise HTTPException(status_code=403, detail="This account is protected and can't be deleted.")
+    supabase = get_supabase()
     owned = owned_stores(supabase, uid)
 
     if owned:
@@ -252,12 +290,29 @@ async def delete_account(body: DeleteBody, current_user=Depends(get_current_user
     supabase.table("business_users").delete().eq("email", current_user.user.email or "__none__").execute()
     supabase.table("rv_accounts").delete().eq("owner_user_id", uid).execute()
 
+    # The shared login goes too only if no other app has anything of theirs.
     login_deleted = False
-    if os.getenv("RK_DELETE_AUTH_LOGIN", "").lower() == "true":
-        try:
-            supabase.auth.admin.delete_user(uid)
-            login_deleted = True
-        except Exception as e:
-            print(f"[account] auth user delete failed: {e}")
-    print(f"[account] deleted ReceiptKept data for {uid}: {len(owned)} store(s)")
-    return {"ok": True, "storesDeleted": len(owned), "loginDeleted": login_deleted, "details": deleted_stores}
+    found = other_app_data(supabase, uid, current_user.user.email)
+    if found is None:
+        kept_because = "check_failed"
+    elif found:
+        kept_because = "other_apps"
+        print(f"[account] keeping login {uid}: data in {', '.join(found)}")
+    else:
+        kept_because = None
+        if is_protected(uid, current_user.user.email):  # belt and braces
+            kept_because = "protected"
+        else:
+            try:
+                supabase.auth.admin.delete_user(uid)
+                login_deleted = True
+            except Exception as e:
+                kept_because = "delete_failed"
+                print(f"[account] auth user delete failed: {e}")
+    return {
+        "ok": True,
+        "storesDeleted": len(owned),
+        "loginDeleted": login_deleted,
+        "loginKeptBecause": None if login_deleted else kept_because,
+        "details": deleted_stores,
+    }

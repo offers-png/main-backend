@@ -232,6 +232,19 @@ class FakeSupabase:
         self.storage = _Storage(self)
         # table -> list of column tuples that must be unique together
         self.unique = {}
+        # rpc name -> fn(params) returning data; a missing one raises (like a
+        # function that doesn't exist in the database)
+        self.rpc_handlers = {}
+
+    def rpc(self, name, params=None):
+        db = self
+
+        class _Call:
+            def execute(self_inner):
+                if name not in db.rpc_handlers:
+                    raise Exception(f"function {name} does not exist")
+                return _Result(db.rpc_handlers[name](params or {}))
+        return _Call()
 
     def table(self, name):
         return _Query(self, name)
