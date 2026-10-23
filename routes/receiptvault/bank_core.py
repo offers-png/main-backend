@@ -137,6 +137,8 @@ def receipt_required(row: dict) -> bool:
     """Does this charge need a receipt the IRS would ask for?"""
     if row.get("status") != "needs_receipt":
         return False
+    if bank_check_number(row.get("description")):
+        return False  # a written check is its own record; an invoice is optional
     return abs(float(row.get("amount") or 0)) >= RECEIPT_THRESHOLD or row.get("category") in ALWAYS_NEEDS_RECEIPT
 
 

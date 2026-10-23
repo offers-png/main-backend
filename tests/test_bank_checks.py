@@ -64,8 +64,8 @@ def test_matches_same_number_within_a_dollar_and_stops_double_counting(db, basic
     # counted once: the matched bank checks are out of the books (Money Box has them)
     books = {x["id"] for x in bank_core.business_transactions(db, s, "2026-10-01", "2026-10-31")}
     assert "b1" not in books and "b2" not in books and "b3" in books
-    # and out of the receipt goal
-    assert {x["id"] for x in client.get("/api/bank/transactions?status=needs_receipt", headers=as_user(OWNER, s)).json()["transactions"]} >= {"b3", "b4"}
+    # checks never sit on the "needs a receipt" list (an invoice is optional)
+    assert not client.get("/api/bank/transactions?status=needs_receipt", headers=as_user(OWNER, s)).json()["transactions"]
     assert bank_routes._counts(db.tables["rv_bank_transactions"])["ignored"] == 2
 
     # a Money Box check can't be used twice
@@ -110,3 +110,13 @@ def test_new_statement_and_new_money_box_check_both_match(db, basic_store, clien
                                                 "amount": 473, "paymentMethod": "check", "note": "Check #26472 · Pepsi"}, headers=h)
     assert r.status_code == 200, r.text
     assert by_desc["CHECK # 26472"]["status"] == "ignored" and by_desc["CHECK # 26472"]["vendor"] == "Pepsi"
+
+
+def test_unmatched_checks_dont_need_a_receipt(db, basic_store, client):
+    s = basic_store
+    bank(db, s, 1, -906.26, "CHECK # 26750")
+    bank(db, s, 2, -906.26, "STAPLES")
+    assert not bank_core.receipt_required(rows(db)["b1"]) and bank_core.receipt_required(rows(db)["b2"])
+    r = client.get("/api/bank/transactions?status=needs_receipt", headers=as_user(OWNER, s)).json()
+    assert [t["id"] for t in r["transactions"]] == ["b2"]
+    assert r["counts"]["goal"]["bigCharges"] == 1

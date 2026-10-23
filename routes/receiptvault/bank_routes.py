@@ -79,6 +79,8 @@ def _is_big_business_charge(r: dict) -> bool:
     """A business charge the IRS wants a receipt for, with or without one."""
     if r.get("status") not in ("needs_receipt", "matched"):
         return False
+    if bank_core.bank_check_number(r.get("description")):
+        return False
     return abs(float(r.get("amount") or 0)) >= bank_core.RECEIPT_THRESHOLD or r.get("category") in bank_core.ALWAYS_NEEDS_RECEIPT
 
 

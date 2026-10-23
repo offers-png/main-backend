@@ -4,7 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from datetime import datetime, timedelta, timezone
 from scheduler import run_scheduled_sends
+from routes.receiptvault.connect_routes import sync_stale_accounts
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.stores import ActiveStoreMiddleware
 from routes.receiptvault.app_setup import register_receiptkept
@@ -25,6 +27,11 @@ async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
     # Run every hour — checks send_day/send_frequency for each business
     scheduler.add_job(run_scheduled_sends, IntervalTrigger(hours=1), id="rv_scheduler", replace_existing=True)
+    # Connected banks: safety net for the daily sync (Stripe's webhook can be
+    # missed). Every 6 hours, and a minute after each start: Render's free
+    # plan sleeps when idle, so a wake-up is often the first chance to run.
+    scheduler.add_job(sync_stale_accounts, IntervalTrigger(hours=6), id="rk_bank_sync", replace_existing=True,
+                      next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1))
     scheduler.start()
     print("[startup] ReceiptVault scheduler started — runs every hour")
     yield

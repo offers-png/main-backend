@@ -143,3 +143,31 @@ def test_growth_connects_two_accounts_max(client, db, growth_store, fc):
     assert ("disconnect", "fca_3") in fc.sub_calls
     r = client.post("/api/bank/connect/session", headers=as_user(OWNER, growth_store))
     assert r.status_code == 402
+
+
+def test_safety_net_syncs_stale_accounts_without_the_webhook(client, db, growth_store, fc):
+    import asyncio
+    from routes.receiptvault import connect_routes
+    fc.session_accounts = [fc_account(1)]
+    fc.add_txn("fca_1", "fctxn_a", -4512, "SHELL OIL", T0, "fctxnref_1")
+    client.post("/api/bank/connect/complete", json={"sessionId": "fcsess_1"}, headers=as_user(OWNER, growth_store))
+    acct = db.tables["rv_bank_accounts"][0]
+
+    # Stripe refreshed overnight but the webhook never arrived
+    fc.add_txn("fca_1", "fctxn_b", -2000, "STAPLES", T0 + 86400, "fctxnref_2")
+    acct["last_synced_at"] = "2026-10-01T00:00:00+00:00"
+    fc.sub_calls.clear()
+    done = asyncio.run(connect_routes.sync_stale_accounts(db))
+    assert done["synced"] == 1 and done["imported"] == 1
+    assert any(t["description"] == "STAPLES" for t in db.tables["rv_bank_transactions"])
+    assert ("refresh", "fca_1") in fc.sub_calls                   # asked Stripe for a fresh one
+    assert acct["last_synced_at"] > "2026-10-02"
+
+    # recently synced: left alone
+    fc.sub_calls.clear()
+    assert asyncio.run(connect_routes.sync_stale_accounts(db))["synced"] == 0 and fc.sub_calls == []
+
+    # plan without bank connection: skipped
+    acct["last_synced_at"] = "2026-10-01T00:00:00+00:00"
+    next(a for a in db.tables["rv_accounts"] if a["owner_user_id"] == OWNER)["plan"] = "basic"
+    assert asyncio.run(connect_routes.sync_stale_accounts(db))["skipped_plan"] == 1

@@ -282,6 +282,54 @@ async def handle_refreshed_transactions(supabase, fc_account: dict):
     await sync_account(supabase, biz[0], row, latest_refresh=refresh.get("id"))
 
 
+STALE_AFTER_HOURS = 12
+
+
+def _hours_since(ts: Optional[str]) -> float:
+    if not ts:
+        return 1e9
+    try:
+        then = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return 1e9
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds() / 3600
+
+
+async def sync_stale_accounts(supabase=None, max_age_hours: float = STALE_AFTER_HOURS) -> dict:
+    """Safety net for the daily sync: don't rely only on Stripe's
+    refreshed_transactions webhook. For every connected account not synced in
+    `max_age_hours`, import whatever Stripe already has, then ask Stripe for a
+    fresh refresh (its webhook, or the next run, brings that in)."""
+    supabase = supabase or get_supabase()
+    rows = (
+        supabase.table("rv_bank_accounts").select("*").eq("source", "stripe").eq("status", "active").execute()
+    ).data or []
+    done = {"checked": len(rows), "synced": 0, "imported": 0, "skipped_plan": 0, "failed": 0}
+    for row in rows:
+        if _hours_since(row.get("last_synced_at")) < max_age_hours:
+            continue
+        biz = supabase.table("businesses").select("*").eq("id", row["business_id"]).execute().data
+        if not biz:
+            continue
+        if not ent.has_feature(ent.account_for_business(supabase, biz[0]), "bank_connection"):
+            done["skipped_plan"] += 1
+            continue
+        try:
+            done["imported"] += await sync_account(supabase, biz[0], row)
+            done["synced"] += 1
+        except Exception as e:
+            done["failed"] += 1
+            print(f"[bank-sync] {row['id']} import failed: {getattr(e, 'detail', e)}")
+        try:
+            await ent.stripe_request("POST", f"financial_connections/accounts/{row['stripe_account_id']}/refresh", {"features[]": "transactions"})
+        except Exception as e:  # e.g. a refresh is already running
+            print(f"[bank-sync] {row['id']} refresh request: {getattr(e, 'detail', e)}")
+    print(f"[bank-sync] {done}")
+    return done
+
+
 @connect_routes.get("/bank/accounts")
 async def list_accounts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
