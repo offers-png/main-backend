@@ -456,7 +456,7 @@ async def apply_referral_reward(supabase, referrer: dict):
     'pending_coupon' and applied automatically when they subscribe.
     Requires the coupon "referral-1-month-free" (100% off, duration=once)
     to exist in Stripe."""
-    from routes.receiptvault.entitlements import get_account
+    from routes.receiptvault.entitlements import get_account, referral_coupon
     account = get_account(supabase, str(referrer["user_id"]))
     sub_id = account.get("stripe_subscription_id")
     if account.get("plan") != "free" and sub_id:
@@ -467,7 +467,7 @@ async def apply_referral_reward(supabase, referrer: dict):
                     "Authorization": f"Bearer {STRIPE_SECRET_KEY}",
                     "Content-Type": "application/x-www-form-urlencoded",
                 },
-                data={"discounts[0][coupon]": os.getenv("STRIPE_REFERRAL_COUPON", "referral-1-month-free")},
+                data={"discounts[0][coupon]": referral_coupon(account.get("plan"), account.get("billing_interval") or "month")},
             )
             if r.status_code < 400:
                 return "stripe_coupon"

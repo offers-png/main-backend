@@ -24,7 +24,6 @@ from routes.receiptvault import entitlements as ent
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://receiptkept.com")
 WEBHOOK_TOLERANCE_SECONDS = 300
-REFERRAL_COUPON = os.getenv("STRIPE_REFERRAL_COUPON", "referral-1-month-free")
 
 billing_routes = APIRouter(prefix="/api", tags=["billing"])
 
@@ -78,12 +77,14 @@ async def billing_status(current_user=Depends(get_current_user)):
 
     plan = account.get("plan") or "free"
     limits = ent.PLAN_LIMITS[plan]
+    interval = account.get("billing_interval") or "month"
     read_only = ent.read_only_store_ids(supabase, owner, account)
     stores = owned_stores(supabase, owner)
     return {
         "plan": plan,
         "planName": limits["name"],
-        "price": limits["price"],
+        "price": ent.plan_price(plan, interval),
+        "interval": interval,
         "features": list(limits["features"]),
         "limits": {
             "scansPerMonth": limits["scans_per_month"],
@@ -99,7 +100,7 @@ async def billing_status(current_user=Depends(get_current_user)):
             "teamMembers": ent.count_team_members(supabase, owner),
             "stores": len([s for s in stores if not s.get("archived_at")]),
         },
-        "extraStorePrice": limits["extra_store_price"],
+        "extraStorePrice": ent.extra_store_price(plan, interval),
         "extraStores": int(account.get("extra_stores") or 0),
         "readOnlyStoreIds": read_only,
         "activeStoreReadOnly": business["id"] in read_only,
@@ -117,6 +118,7 @@ async def billing_status(current_user=Depends(get_current_user)):
 
 class CheckoutBody(BaseModel):
     plan: str
+    interval: str = "month"  # "month" | "year"
 
 
 async def _ensure_customer(supabase, account: dict, current_user) -> str:
@@ -152,9 +154,14 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
     the extra-store add-on to the new plan's add-on price."""
     if body.plan not in ("basic", "growth", "business"):
         raise HTTPException(status_code=400, detail="Pick Basic, Growth or Business.")
-    price = ent.plan_price_id(body.plan)
-    if not price:
-        raise HTTPException(status_code=503, detail="That plan isn't available yet. Please try again later.")
+    if body.interval not in ent.INTERVALS:
+        raise HTTPException(status_code=400, detail="Pick monthly or yearly.")
+    interval = body.interval
+    price = ent.plan_price_id(body.plan, interval)
+    addon_price = ent.addon_price_id(body.plan, interval)
+    if not price or not addon_price:
+        what = "Yearly billing" if interval == "year" else "That plan"
+        raise HTTPException(status_code=503, detail=f"{what} isn't available yet. Please try again later.")
 
     supabase = get_supabase()
     _business, account = _owner_account_or_403(supabase, current_user)
@@ -164,7 +171,12 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
     sub_id = account.get("stripe_subscription_id")
     if sub_id and account.get("plan") != "free":
         sub = await ent.stripe_request("GET", f"subscriptions/{sub_id}")
-        data = {"proration_behavior": "create_prorations", "metadata[owner_user_id]": owner, "metadata[plan]": body.plan}
+        # Every item moves to the same billing period (Stripe requires it).
+        # The difference is billed NOW (always_invoice) — otherwise an upgrade on a
+        # yearly plan wouldn't be paid for until next year. Downgrades become a
+        # credit on the next bill. pending_if_incomplete: if the card is declined,
+        # the subscription stays as it was instead of unlocking the bigger plan.
+        data = {"proration_behavior": "always_invoice", "payment_behavior": "pending_if_incomplete"}
         i = 0
         addon_done = False
         for item in (sub.get("items") or {}).get("data", []):
@@ -176,18 +188,18 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
             elif ent.is_addon_price(pid):
                 data[f"items[{i}][id]"] = item["id"]
                 if extra > 0:
-                    data[f"items[{i}][price]"] = ent.addon_price_id(body.plan)
+                    data[f"items[{i}][price]"] = addon_price
                     data[f"items[{i}][quantity]"] = str(extra)
                 else:
                     data[f"items[{i}][deleted]"] = "true"
                 addon_done = True
                 i += 1
         if extra > 0 and not addon_done:
-            data[f"items[{i}][price]"] = ent.addon_price_id(body.plan)
+            data[f"items[{i}][price]"] = addon_price
             data[f"items[{i}][quantity]"] = str(extra)
         updated = await ent.stripe_request("POST", f"subscriptions/{sub_id}", data)
         ent.apply_subscription(supabase, updated, owner)
-        return {"updated": True, "plan": body.plan}
+        return {"updated": True, "plan": body.plan, "interval": interval}
 
     customer_id = await _ensure_customer(supabase, account, current_user)
     data = {
@@ -200,6 +212,7 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
         "client_reference_id": owner,
         "metadata[owner_user_id]": owner,
         "metadata[plan]": body.plan,
+        "metadata[interval]": interval,
         # Lets other apps' webhooks on this Stripe account skip ReceiptKept sessions
         "metadata[app]": "receiptkept",
         "subscription_data[metadata][app]": "receiptkept",
@@ -208,13 +221,13 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
         "allow_promotion_codes": "true",
     }
     if extra > 0:
-        data["line_items[1][price]"] = ent.addon_price_id(body.plan)
+        data["line_items[1][price]"] = addon_price
         data["line_items[1][quantity]"] = str(extra)
     reward = _pending_referral_reward(supabase, owner)
     if reward:
         # Stripe allows promotion codes OR discounts, not both
         data.pop("allow_promotion_codes")
-        data["discounts[0][coupon]"] = REFERRAL_COUPON
+        data["discounts[0][coupon]"] = ent.referral_coupon(body.plan, interval)
         data["metadata[referral_id]"] = reward["id"]
     session = await ent.stripe_request("POST", "checkout/sessions", data)
     return {"url": session["url"]}

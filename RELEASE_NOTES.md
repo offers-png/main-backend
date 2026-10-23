@@ -172,6 +172,29 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
 - Until the new backend is deployed, Render answers test events with errors
   (old code); Stripe retries for up to 3 days and may email you about it.
 
+## Yearly billing — added 2026-10-23
+
+- Yearly prices about 30% off: Basic $49.99/yr, Growth $125.99/yr, Business
+  $251.99/yr; extra stores $41.99 / $83.99 / $125.99 per year. A yearly
+  customer's extra stores are billed yearly too (Stripe requires every item
+  on a subscription to share one billing period).
+- Monthly/Yearly switch with a "Save 30%" badge on the Plans page and the
+  landing page. It only appears once the yearly price IDs are configured, so
+  nobody sees a broken button. Customers can switch monthly <-> yearly from
+  the Plans page.
+- **Plan changes are now billed immediately** (`always_invoice`) instead of
+  on the next bill. Without this, upgrading on a yearly plan wouldn't be paid
+  for until a year later. A change only goes through if the card is charged
+  (`pending_if_incomplete`). Downgrades, removed stores, and yearly -> monthly
+  switches become a **credit on future bills, not a cash refund**.
+- Referral reward on yearly plans is a month's worth off ($5.99 / $14.99 /
+  $29.99), not 100% off, which would have meant a free year.
+- Stripe test mode: 6 yearly prices on the same products as the monthly
+  ones, plus coupons `referral-1-month-basic/growth/business`. The setup
+  script creates them for live the same way. Tested: real Checkout at
+  $49.99/yr, upgrades, extra store, downgrade, monthly <-> yearly, cancel —
+  25/25 checks, every bill paid at once, nothing left waiting on a future bill.
+
 ## Must do before going live (owner)
 
 1. **Rotate the Supabase service-role key if it hasn't been done since July.**
@@ -207,6 +230,7 @@ Database changes are already applied to Supabase project `wzcuzyouymauokijaqjk`
      still works)
    - `STRIPE_PRICE_BASIC`, `STRIPE_PRICE_GROWTH`, `STRIPE_PRICE_BUSINESS`,
      `STRIPE_PRICE_STORE_BASIC`, `STRIPE_PRICE_STORE_GROWTH`, `STRIPE_PRICE_STORE_BUSINESS`
+   - yearly: the same six names with `_YEARLY` on the end
    - `RESEND_API_KEY`, `RESEND_INBOUND_WEBHOOK_SECRET`, optional
      `INBOUND_EMAIL_DOMAIN` (default `in.receiptkept.com`)
    - optional `PDFSHIFT_API_KEY` (forwarded emails with no attachment become PDFs)

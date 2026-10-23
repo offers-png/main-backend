@@ -17,6 +17,12 @@ PRICES = {
     "STRIPE_PRICE_STORE_BASIC": "price_store_basic",
     "STRIPE_PRICE_STORE_GROWTH": "price_store_growth",
     "STRIPE_PRICE_STORE_BUSINESS": "price_store_business",
+    "STRIPE_PRICE_BASIC_YEARLY": "price_basic_y",
+    "STRIPE_PRICE_GROWTH_YEARLY": "price_growth_y",
+    "STRIPE_PRICE_BUSINESS_YEARLY": "price_business_y",
+    "STRIPE_PRICE_STORE_BASIC_YEARLY": "price_store_basic_y",
+    "STRIPE_PRICE_STORE_GROWTH_YEARLY": "price_store_growth_y",
+    "STRIPE_PRICE_STORE_BUSINESS_YEARLY": "price_store_business_y",
 }
 SECRET = "whsec_test"
 
@@ -262,3 +268,92 @@ def test_webhook_for_deleted_account_recreates_nothing(client, db):
            "items": {"data": [{"id": "si", "price": {"id": "price_basic"}, "quantity": 1}]}}
     send_event(client, "customer.subscription.created", sub)
     assert not [a for a in db.tables.get("rv_accounts", []) if a["owner_user_id"] == gone]
+
+
+
+def test_plans_list_yearly_prices(client):
+    plans = {p["plan"]: p for p in client.get("/api/billing/plans").json()}
+    assert [plans[p]["priceYearly"] for p in ("basic", "growth", "business")] == [49.99, 125.99, 251.99]
+    assert [plans[p]["extraStorePriceYearly"] for p in ("basic", "growth", "business")] == [41.99, 83.99, 125.99]
+    assert all(plans[p]["availableYearly"] for p in plans)
+    assert not any("Extra stores" in h for p in plans.values() for h in p["highlights"])
+
+
+def test_yearly_hidden_until_prices_are_set(client, monkeypatch):
+    monkeypatch.delenv("STRIPE_PRICE_GROWTH_YEARLY")
+    plans = {p["plan"]: p for p in client.get("/api/billing/plans").json()}
+    assert plans["growth"]["availableYearly"] is False and plans["growth"]["available"] is True
+    s = make_first_store(client)
+    r = client.post("/api/billing/checkout", json={"plan": "growth", "interval": "year"}, headers=as_user(OWNER, s))
+    assert r.status_code == 503 and "Yearly billing" in r.json()["detail"]
+
+
+def test_full_yearly_flow(client, db, stripe):
+    s = make_first_store(client)
+    finish_setup(client, OWNER, s)
+    r = client.post("/api/billing/checkout", json={"plan": "basic", "interval": "year"}, headers=as_user(OWNER, s))
+    assert r.status_code == 200 and stripe.last_checkout["line_items[0][price]"] == "price_basic_y"
+    assert stripe.last_checkout["metadata[interval]"] == "year"
+    sub = stripe.new_sub("price_basic_y")
+    send_event(client, "checkout.session.completed", {"mode": "subscription", "customer": "cus_1", "subscription": sub["id"], "metadata": {"owner_user_id": OWNER}})
+    st = status(client, s)
+    assert st["plan"] == "basic" and st["interval"] == "year" and st["price"] == 49.99 and st["extraStorePrice"] == 41.99
+
+    for plan in ("growth", "business"):
+        assert client.post("/api/billing/checkout", json={"plan": plan, "interval": "year"}, headers=as_user(OWNER, s)).json()["interval"] == "year"
+    st = status(client, s)
+    assert st["plan"] == "business" and st["interval"] == "year" and st["price"] == 251.99
+
+    # extra store bills yearly too
+    b = client.post("/api/stores", json={"businessName": "B", "businessAddress": "x"}, headers=as_user(OWNER)).json()["id"]
+    items = sorted((i["price"]["id"], i["quantity"]) for i in sub["items"]["data"])
+    assert items == [("price_business_y", 1), ("price_store_business_y", 1)]
+
+    # yearly -> monthly moves BOTH items to monthly
+    client.post("/api/billing/checkout", json={"plan": "business", "interval": "month"}, headers=as_user(OWNER, s))
+    assert sorted(i["price"]["id"] for i in sub["items"]["data"]) == ["price_business", "price_store_business"]
+    assert status(client, b)["interval"] == "month"
+    # and back to yearly on Basic
+    client.post("/api/billing/checkout", json={"plan": "basic", "interval": "year"}, headers=as_user(OWNER, s))
+    assert sorted(i["price"]["id"] for i in sub["items"]["data"]) == ["price_basic_y", "price_store_basic_y"]
+    send_event(client, "customer.subscription.updated", sub)
+    st = status(client, b)
+    assert st["plan"] == "basic" and st["interval"] == "year" and st["extraStores"] == 1 and not st["activeStoreReadOnly"]
+
+    # cancel -> Free, back to monthly display, extra store view-only
+    send_event(client, "customer.subscription.deleted", sub)
+    st = status(client, b)
+    assert st["plan"] == "free" and st["interval"] == "month" and st["activeStoreReadOnly"]
+
+
+def test_view_only_message_uses_yearly_price(client, db, stripe):
+    s = make_first_store(client)
+    client.post("/api/billing/checkout", json={"plan": "basic", "interval": "year"}, headers=as_user(OWNER, s))
+    sub = stripe.new_sub("price_basic_y")
+    send_event(client, "checkout.session.completed", {"mode": "subscription", "customer": "cus_1", "subscription": sub["id"], "metadata": {"owner_user_id": OWNER}})
+    b = client.post("/api/stores", json={"businessName": "B", "businessAddress": "x"}, headers=as_user(OWNER)).json()["id"]
+    db.tables["rv_accounts"][0]["extra_stores"] = 0  # e.g. add-on removed in Stripe
+    r = client.post("/api/money-entries", json={"entryDate": "2026-10-05", "entryType": "income", "category": "sales_cash", "amount": 1}, headers=as_user(OWNER, b))
+    assert r.status_code == 402 and "$41.99/year on Basic" in r.json()["detail"]["message"]
+
+
+def test_referral_reward_is_one_month_on_yearly_plans(client, db, stripe):
+    from routes.receiptvault import entitlements as ent
+    assert ent.referral_coupon("basic", "month") == "referral-1-month-free"
+    assert ent.referral_coupon("growth", "year") == "referral-1-month-growth"
+    s = make_first_store(client)
+    ref = db.tables["businesses"][0]
+    db.tables.setdefault("referrals", []).append({"id": "r1", "referrer_business_id": ref["id"], "reward_type": "pending_coupon", "reward_applied": False})
+    client.post("/api/billing/checkout", json={"plan": "growth", "interval": "year"}, headers=as_user(OWNER, s))
+    assert stripe.last_checkout["discounts[0][coupon]"] == "referral-1-month-growth"
+
+
+def test_plan_changes_and_extra_stores_are_billed_immediately(client, db, stripe, http_calls):
+    s = make_first_store(client)
+    client.post("/api/billing/checkout", json={"plan": "basic", "interval": "year"}, headers=as_user(OWNER, s))
+    sub = stripe.new_sub("price_basic_y")
+    send_event(client, "checkout.session.completed", {"mode": "subscription", "customer": "cus_1", "subscription": sub["id"], "metadata": {"owner_user_id": OWNER}})
+    client.post("/api/billing/checkout", json={"plan": "business", "interval": "year"}, headers=as_user(OWNER, s))
+    client.post("/api/stores", json={"businessName": "B", "businessAddress": "x"}, headers=as_user(OWNER))
+    changes = [kw.get("data") or {} for m, u, kw in http_calls.calls if m == "POST" and ("/subscriptions/" in u or u.endswith("/subscription_items") or "/subscription_items/" in u)]
+    assert changes and all(c.get("proration_behavior") == "always_invoice" and c.get("payment_behavior") == "pending_if_incomplete" for c in changes)

@@ -33,45 +33,53 @@ PLAN_LIMITS = {
     "free": {
         "name": "Free",
         "price": 0.0,
+        "price_yearly": 0.0,
         "scans_per_month": 10,
         "statement_uploads_per_month": 0,
         "bank_accounts": 0,
         "team_members": 0,
         "included_stores": 1,
         "extra_store_price": None,  # can't add stores on Free
+        "extra_store_price_yearly": None,
         "features": _EVERY_PLAN,
     },
     "basic": {
         "name": "Basic",
         "price": 5.99,
+        "price_yearly": 49.99,  # ~30% off 12 x 5.99
         "scans_per_month": 50,
         "statement_uploads_per_month": 2,
         "bank_accounts": 0,
         "team_members": 0,
         "included_stores": 1,
         "extra_store_price": 4.99,
+        "extra_store_price_yearly": 41.99,
         "features": _BASIC_UP,
     },
     "growth": {
         "name": "Growth",
         "price": 14.99,
+        "price_yearly": 125.99,
         "scans_per_month": None,
         "statement_uploads_per_month": None,
         "bank_accounts": 2,
         "team_members": 3,
         "included_stores": 1,
         "extra_store_price": 9.99,
+        "extra_store_price_yearly": 83.99,
         "features": _GROWTH_UP,
     },
     "business": {
         "name": "Business",
         "price": 29.99,
+        "price_yearly": 251.99,
         "scans_per_month": None,
         "statement_uploads_per_month": None,
         "bank_accounts": None,
         "team_members": None,
         "included_stores": 1,
         "extra_store_price": 14.99,
+        "extra_store_price_yearly": 125.99,
         "features": _GROWTH_UP,
     },
 }
@@ -113,7 +121,6 @@ PLAN_HIGHLIGHTS = {
         "Accountant PDF, accountant dropbox and \"Get My Papers\"",
         "Upload 2 bank statements a month",
         "Auto-sort charges, match receipts, Personal button",
-        "Extra stores $4.99/mo each",
     ],
     "growth": [
         "Unlimited receipt scans",
@@ -122,50 +129,80 @@ PLAN_HIGHLIGHTS = {
         "Forward receipts by email",
         "Connect 2 bank accounts",
         "Team: 3 people with approvals",
-        "Extra stores $9.99/mo each",
     ],
     "business": [
         "Unlimited receipt scans",
         "Everything in Growth",
         "Connect unlimited bank accounts",
         "Unlimited team members",
-        "Extra stores $14.99/mo each",
     ],
 }
 
 # Stripe price IDs come from env vars (test-mode IDs first, live IDs later).
+# Monthly keep their original names; yearly add _YEARLY.
+INTERVALS = ("month", "year")
 PRICE_ENV = {
-    "basic": "STRIPE_PRICE_BASIC",
-    "growth": "STRIPE_PRICE_GROWTH",
-    "business": "STRIPE_PRICE_BUSINESS",
+    (plan, interval): f"STRIPE_PRICE_{plan.upper()}" + ("_YEARLY" if interval == "year" else "")
+    for plan in ("basic", "growth", "business") for interval in INTERVALS
 }
 ADDON_PRICE_ENV = {
-    "basic": "STRIPE_PRICE_STORE_BASIC",
-    "growth": "STRIPE_PRICE_STORE_GROWTH",
-    "business": "STRIPE_PRICE_STORE_BUSINESS",
+    (plan, interval): f"STRIPE_PRICE_STORE_{plan.upper()}" + ("_YEARLY" if interval == "year" else "")
+    for plan in ("basic", "growth", "business") for interval in INTERVALS
 }
 DEFAULT_TIMEZONE = "America/New_York"
 
 
-def plan_price_id(plan: str) -> Optional[str]:
-    env = PRICE_ENV.get(plan)
-    return os.getenv(env) if env else None
+def plan_price_id(plan: str, interval: str = "month") -> Optional[str]:
+    env = PRICE_ENV.get((plan, interval))
+    return (os.getenv(env) or "").strip() or None if env else None
 
 
-def addon_price_id(plan: str) -> Optional[str]:
-    env = ADDON_PRICE_ENV.get(plan)
-    return os.getenv(env) if env else None
+def addon_price_id(plan: str, interval: str = "month") -> Optional[str]:
+    env = ADDON_PRICE_ENV.get((plan, interval))
+    return (os.getenv(env) or "").strip() or None if env else None
+
+
+def price_info(price_id: Optional[str]):
+    """(plan, interval, is_addon) for one of our price ids, else (None, None, False)."""
+    if price_id:
+        for (plan, interval) in PRICE_ENV:
+            if plan_price_id(plan, interval) == price_id:
+                return plan, interval, False
+            if addon_price_id(plan, interval) == price_id:
+                return plan, interval, True
+    return None, None, False
 
 
 def plan_for_price(price_id: Optional[str]) -> Optional[str]:
-    for plan in PRICE_ENV:
-        if price_id and plan_price_id(plan) == price_id:
-            return plan
-    return None
+    plan, _interval, addon = price_info(price_id)
+    return None if addon else plan
 
 
 def is_addon_price(price_id: Optional[str]) -> bool:
-    return bool(price_id) and any(addon_price_id(p) == price_id for p in ADDON_PRICE_ENV)
+    return price_info(price_id)[2]
+
+
+def plan_price(plan: str, interval: str = "month") -> float:
+    p = PLAN_LIMITS[plan]
+    return p["price_yearly"] if interval == "year" else p["price"]
+
+
+def extra_store_price(plan: str, interval: str = "month") -> Optional[float]:
+    p = PLAN_LIMITS[plan]
+    return p["extra_store_price_yearly"] if interval == "year" else p["extra_store_price"]
+
+
+def referral_coupon(plan: str, interval: str = "month") -> str:
+    """One free month. On a yearly bill a 100%-off coupon would be a free
+    year, so yearly plans use a fixed month's-worth coupon per plan
+    (created by scripts/stripe_setup_receiptkept.py)."""
+    if interval == "year":
+        return f"referral-1-month-{plan}"
+    return os.getenv("STRIPE_REFERRAL_COUPON", "referral-1-month-free")
+
+
+def per(interval: str) -> str:
+    return "year" if interval == "year" else "month"
 
 
 def cheapest_plan_with(feature: str) -> str:
@@ -200,10 +237,13 @@ def public_plans() -> list:
                 "teamMembers": p["team_members"],
                 "includedStores": p["included_stores"],
             },
+            "priceYearly": p["price_yearly"],
             "extraStorePrice": p["extra_store_price"],
+            "extraStorePriceYearly": p["extra_store_price_yearly"],
             "features": list(p["features"]),
             "highlights": PLAN_HIGHLIGHTS[plan],
-            "available": plan == "free" or bool(plan_price_id(plan)),
+            "available": plan == "free" or bool(plan_price_id(plan, "month")),
+            "availableYearly": plan == "free" or bool(plan_price_id(plan, "year") and addon_price_id(plan, "year")),
         })
     return out
 
@@ -453,10 +493,11 @@ def check_store_writable(supabase, business: dict, role: str = "owner"):
     elif role == "owner":
         nxt = account.get("plan") if account.get("plan") != "free" else "basic"
         p = PLAN_LIMITS[nxt]
+        interval = account.get("billing_interval") or "month"
         n = allowed_store_count(account)
         msg = (
             f"Your plan pays for {n} store{'' if n == 1 else 's'}, so this one is view-only. "
-            f"Add it to your plan (${p['extra_store_price']:.2f}/month on {p['name']}) or archive an extra store in Settings."
+            f"Add it to your plan (${extra_store_price(nxt, interval):.2f}/{per(interval)} on {p['name']}) or archive an extra store in Settings."
         )
     else:
         msg = "This store is view-only right now. Ask the owner to update their plan."
@@ -521,17 +562,21 @@ async def sync_store_addon_quantity(supabase, owner_user_id: str):
     extra = max(0, len(active_owned_stores(supabase, owner_user_id)) - PLAN_LIMITS[plan]["included_stores"])
     if plan == "free" or not sub_id:
         return
-    price = addon_price_id(plan)
+    interval = account.get("billing_interval") or "month"
+    price = addon_price_id(plan, interval)
     if not price:
         raise HTTPException(status_code=503, detail="Extra-store billing isn't set up yet. Please try again later.")
     sub = await stripe_request("GET", f"subscriptions/{sub_id}")
     item = _addon_item(sub)
+    # Bill the change now (a new store on a yearly plan shouldn't wait a year to
+    # be paid for); removing one becomes a credit on the next bill.
+    now = {"proration_behavior": "always_invoice", "payment_behavior": "pending_if_incomplete"}
     if extra > 0 and item:
-        await stripe_request("POST", f"subscription_items/{item['id']}", {"quantity": str(extra), "price": price, "proration_behavior": "create_prorations"})
+        await stripe_request("POST", f"subscription_items/{item['id']}", {"quantity": str(extra), "price": price, **now})
     elif extra > 0:
-        await stripe_request("POST", "subscription_items", {"subscription": sub_id, "price": price, "quantity": str(extra), "proration_behavior": "create_prorations"})
+        await stripe_request("POST", "subscription_items", {"subscription": sub_id, "price": price, "quantity": str(extra), **now})
     elif item:
-        await stripe_request("DELETE", f"subscription_items/{item['id']}?proration_behavior=create_prorations")
+        await stripe_request("DELETE", f"subscription_items/{item['id']}?proration_behavior=always_invoice")
     # Webhook confirms this later; set it now so the new store is usable at once.
     update_account(supabase, owner_user_id, {"extra_stores": extra})
 
@@ -554,12 +599,13 @@ def apply_subscription(supabase, subscription: dict, owner_user_id: Optional[str
         return None
 
     status = subscription.get("status")
-    plan, extra = None, 0
+    plan, extra, interval = None, 0, "month"
     for item in (subscription.get("items") or {}).get("data", []):
         pid = (item.get("price") or {}).get("id")
-        if plan_for_price(pid):
-            plan = plan_for_price(pid)
-        elif is_addon_price(pid):
+        p_plan, p_interval, p_addon = price_info(pid)
+        if p_plan and not p_addon:
+            plan, interval = p_plan, p_interval
+        elif p_addon:
             extra = int(item.get("quantity") or 0)
 
     live = status in ("active", "trialing", "past_due")
@@ -568,10 +614,11 @@ def apply_subscription(supabase, subscription: dict, owner_user_id: Optional[str
         "subscription_status": status,
     }
     if live and plan:
-        data.update({"plan": plan, "extra_stores": extra, "stripe_subscription_id": subscription.get("id")})
+        data.update({"plan": plan, "extra_stores": extra, "stripe_subscription_id": subscription.get("id"),
+                     "billing_interval": interval})
     elif not live:
         # Ended — back to Free. Data is never deleted; extra stores go view-only.
-        data.update({"plan": "free", "extra_stores": 0, "stripe_subscription_id": None})
+        data.update({"plan": "free", "extra_stores": 0, "stripe_subscription_id": None, "billing_interval": "month"})
     if subscription.get("current_period_end"):
         data["current_period_end"] = datetime.fromtimestamp(int(subscription["current_period_end"]), timezone.utc).isoformat()
     update_account(supabase, owner, data)
