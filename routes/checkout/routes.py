@@ -94,6 +94,9 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        # ReceiptKept shares this Stripe account; its checkouts are not API-key purchases
+        if (session.get("metadata") or {}).get("app") == "receiptkept":
+            return {"received": True, "skipped": "receiptkept"}
         session_id = session["id"]
         payment_status = session.get("payment_status")
 
