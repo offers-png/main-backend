@@ -275,7 +275,8 @@ async def get_tax_payments(current_user=Depends(get_current_user)):
     # property tax is a landlord/owner-of-record matter, not a tenant
     # business's income-tax payment flow, so neither belongs on this screen.
     uploaded_files = row.get("uploaded_files") or []
-    document = {"path": uploaded_files[0]["path"]} if uploaded_files else None
+    from routes.receiptvault.files import sign_one
+    document = {"path": sign_one(supabase, uploaded_files[0]["path"])} if uploaded_files else None
     return {
         "federal": {"amount": float(row.get("federal_owed") or 0), "paymentLink": row.get("federal_link")},
         "state": {"amount": float(row.get("state_owed") or 0), "paymentLink": row.get("state_link")},

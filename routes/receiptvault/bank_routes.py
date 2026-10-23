@@ -20,6 +20,7 @@ from routes.receiptvault.routes import (
 from routes.receiptvault.stores import resolve_store
 from routes.receiptvault.categories import CATEGORY_NAMES, TRANSFER, line_for, normalize_category
 from routes.receiptvault import bank_core
+from routes.receiptvault.files import sign_receipts
 
 bank_routes = APIRouter(prefix="/api", tags=["bank"])
 BANK_ROLES = ("owner", "manager", "bookkeeper")
@@ -57,6 +58,7 @@ def _with_receipts(supabase, business_id: str, txns: list) -> list:
         r = receipts.get(t.get("matched_receipt_id"))
         item["receipt"] = to_receipt(r) if r else None
         out.append(item)
+    sign_receipts(supabase, [i["receipt"] for i in out if i["receipt"]])
     return out
 
 
@@ -214,7 +216,7 @@ async def match_candidates(txn_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business, _role = bank_store(supabase, current_user)
     txn = _get_txn(supabase, business["id"], txn_id)
-    return [to_receipt(r) for r in bank_core.receipt_candidates(supabase, business["id"], txn)]
+    return sign_receipts(supabase, [to_receipt(r) for r in bank_core.receipt_candidates(supabase, business["id"], txn)])
 
 
 @bank_routes.post("/bank/transactions/{txn_id}/receipt", status_code=201)
@@ -274,7 +276,7 @@ async def scan_receipt_for_charge(txn_id: str, request: Request, current_user=De
         "match_locked": True,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", txn_id).execute()
-    return {"receipt": to_receipt(row), "transaction": _with_receipts(supabase, business["id"], [_get_txn(supabase, business["id"], txn_id)])[0]}
+    return {"receipt": sign_receipts(supabase, [to_receipt(row)])[0], "transaction": _with_receipts(supabase, business["id"], [_get_txn(supabase, business["id"], txn_id)])[0]}
 
 
 @bank_routes.post("/bank/rematch")

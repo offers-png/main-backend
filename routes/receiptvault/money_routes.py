@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 from routes.receiptvault.routes import get_current_user, resolve_module_access, plan_feature
+from routes.receiptvault.files import sign, sign_one
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -356,7 +357,7 @@ async def generate_money_packet(body: PacketRequestBody, current_user=Depends(ge
         "totalIncome": total_income,
         "totalExpenses": total_expenses,
         "netIncome": net_income,
-        "fileUrl": file_url,
+        "fileUrl": sign_one(supabase, file_url),
     }
 
 
@@ -366,6 +367,7 @@ async def list_money_packets(current_user=Depends(get_current_user)):
     business = resolve_module_access(supabase, current_user.user.id, "money_box")
     rows = supabase.table("rv_money_packets").select("*")\
         .eq("business_id", business["id"]).order("created_at", desc=True).execute()
+    links = sign(supabase, [r.get("file_path") for r in (rows.data or [])])
     return [{
         "id": r.get("id"),
         "periodStart": str(r.get("period_start", "")),
@@ -373,6 +375,6 @@ async def list_money_packets(current_user=Depends(get_current_user)):
         "totalIncome": float(r.get("total_income") or 0),
         "totalExpenses": float(r.get("total_expenses") or 0),
         "netIncome": float(r.get("net_income") or 0),
-        "fileUrl": r.get("file_path"),
+        "fileUrl": links.get(r.get("file_path"), r.get("file_path")),
         "createdAt": str(r.get("created_at", "")),
     } for r in (rows.data or [])]

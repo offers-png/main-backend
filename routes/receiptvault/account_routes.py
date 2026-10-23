@@ -166,7 +166,8 @@ async def export_account(current_user=Depends(get_current_user)):
             "Each store has its own folder: a .json file with everything, plus a .csv per kind of record",
             "(receipts, Money Box entries, mileage, invoices, inventory, bank charges...).",
             "expenses.csv is the same spreadsheet as Settings -> Download expenses, for all dates.",
-            "Receipt photos and PDFs are linked in the file_path column of receipts.csv.",
+            "Receipt photos and PDFs: open the 'Receipt link' column in expenses.csv (links work for 30 days;",
+            "download them again from Settings any time). file_path in receipts.csv is where the file is stored.",
         ]
         from routes.receiptvault.export_routes import store_rows, COLUMNS
         for b in owned:

@@ -30,6 +30,8 @@ receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
 _supabase_client = None
 
+from routes.receiptvault.files import sign_receipts  # noqa: E402  (private bucket -> signed links)
+
 # One shared category list with Schedule C lines — see categories.py.
 from routes.receiptvault.categories import (  # noqa: E402
     CATEGORY_NAMES as CATEGORIES,
@@ -677,7 +679,7 @@ async def list_receipts(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "receipts")
     result = supabase.table("receipts").select("*").eq("business_id", business["id"]).order("uploaded_at", desc=True).execute()
-    return [to_receipt(r) for r in result.data]
+    return sign_receipts(supabase, [to_receipt(r) for r in result.data])
 
 
 @receipt_routes.get("/receipts/{receipt_id}", dependencies=[Depends(require_active_subscription)])
@@ -695,7 +697,7 @@ async def get_receipt(receipt_id: str, current_user=Depends(get_current_user)):
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Receipt not found")
-    return to_receipt(result.data[0])
+    return sign_receipts(supabase, [to_receipt(result.data[0])])[0]
 
 
 @receipt_routes.post("/receipts/{receipt_id}/extract", dependencies=[Depends(require_active_subscription)])
@@ -755,8 +757,8 @@ async def reextract_receipt(receipt_id: str, current_user=Depends(get_current_us
 
     if update_data:
         updated = supabase.table("receipts").update(update_data).eq("id", receipt_id).execute()
-        return to_receipt(updated.data[0])
-    return to_receipt(row)
+        return sign_receipts(supabase, [to_receipt(updated.data[0])])[0]
+    return sign_receipts(supabase, [to_receipt(row)])[0]
 
 
 class UpdateReceiptBody(BaseModel):
@@ -798,7 +800,7 @@ async def update_receipt(receipt_id: str, body: UpdateReceiptBody, current_user=
     result = supabase.table("receipts").update(update_data).eq("id", receipt_id).eq("business_id", biz.data[0]["id"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Receipt not found")
-    return to_receipt(result.data[0])
+    return sign_receipts(supabase, [to_receipt(result.data[0])])[0]
 
 
 @receipt_routes.post("/receipts", status_code=201, dependencies=[Depends(require_active_subscription)])
@@ -844,7 +846,7 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
         approval_status="approved" if uploader_role in AUTO_APPROVE_ROLES else "pending",
         ocr_base64=ocr_base64,
     )
-    return JSONResponse(status_code=201, content=to_receipt(row))
+    return JSONResponse(status_code=201, content=sign_receipts(supabase, [to_receipt(row)])[0])
 
 
 async def save_receipt(supabase, business: dict, *, content: bytes, original_name: str, ext: str, mime: str,

@@ -211,7 +211,17 @@ class _Bucket:
             self.db.storage_files.pop((self.name, p), None)
 
     def create_signed_url(self, path, expires):
-        return {"signedURL": f"https://signed.example/{path}"}
+        return {"signedURL": f"https://signed.example/{path}?expires={expires}"}
+
+    def create_signed_urls(self, paths, expires):
+        # like Supabase: unknown files come back with an error
+        out = []
+        for p in paths:
+            if (self.name, p) in self.db.storage_files:
+                out.append({"path": p, "error": None, "signedURL": f"https://signed.example/{p}?expires={expires}"})
+            else:
+                out.append({"path": p, "error": "Object not found", "signedURL": None})
+        return out
 
     def get_public_url(self, path):
         return f"https://public.example/{path}"

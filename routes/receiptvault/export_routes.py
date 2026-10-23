@@ -127,6 +127,10 @@ def store_rows(supabase, business: dict, start: str, end: str, include_personal:
             "Notes": "Entered in Money Box",
         })
 
+    from routes.receiptvault.files import sign, SHARE_SECONDS
+    links = sign(supabase, [r["Receipt link"] for r in rows if r["Receipt link"]], SHARE_SECONDS)
+    for r in rows:
+        r["Receipt link"] = links.get(r["Receipt link"], r["Receipt link"])
     rows.sort(key=lambda x: x["Date"])
     return rows
 

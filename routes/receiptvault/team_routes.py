@@ -169,7 +169,8 @@ async def pending_approvals(current_user=Depends(get_current_user)):
     rows = supabase.table("receipts").select("*")\
         .eq("business_id", business["id"])\
         .eq("approval_status", "pending").execute()
-    return [to_receipt(r) for r in (rows.data or [])]
+    from routes.receiptvault.files import sign_receipts
+    return sign_receipts(supabase, [to_receipt(r) for r in (rows.data or [])])
 
 @team_routes.post("/team/receipts/{receipt_id}/approve")
 async def approve_receipt(receipt_id: str, current_user=Depends(get_current_user)):
