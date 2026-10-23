@@ -163,6 +163,8 @@ def to_txn(row: dict) -> dict:
         "isPersonal": bool(row.get("is_personal")),
         "countsAsIncome": bool(row.get("counts_as_income")),
         "matchedReceiptId": row.get("matched_receipt_id"),
+        "matchedMoneyEntryId": row.get("matched_money_entry_id"),
+        "checkNumber": bank_check_number(row.get("description")),
         "status": row.get("status"),
         "receiptRequired": receipt_required(row),
         "categorySource": row.get("category_source"),
@@ -411,8 +413,10 @@ async def import_transactions(supabase, business: dict, txns: list, *, source: s
                 except Exception:
                     duplicates += 1
 
+    # Checks already written down in Money Box first, so they aren't matched to receipts
+    checks = match_checks(supabase, business_id, inserted) if auto else 0
     matched = match_transactions(supabase, business_id, inserted) if auto else 0
-    return {"imported": len(inserted), "duplicates": duplicates, "matched": matched, "transactions": inserted}
+    return {"imported": len(inserted), "duplicates": duplicates, "matched": matched, "checksMatched": checks, "transactions": inserted}
 
 
 # ── Receipt matching ────────────────────────────────────────────────────────
@@ -566,6 +570,91 @@ def apply_known_vendors(supabase, rows: list) -> int:
         r.update(data)
         n += 1
     return n
+
+
+# ── Bank checks <-> Money Box checks ────────────────────────────────────────
+# "CHECK # 26471" on the statement is the same money as the Money Box entry
+# "Check #26471 · Corona". Money Box already counts it, so the bank charge is
+# linked and marked "already counted" (status ignored) instead of counted twice.
+
+CHECK_AMOUNT_TOLERANCE = 1.00   # Money Box checks are often typed without cents
+_BANK_CHECK_RE = re.compile(r"^\s*(?:check|chk|ck)\s*(?:no\.?|number)?\s*#?\s*(\d{2,})\b", re.I)
+_MONEY_CHECK_RE = re.compile(r"\b(?:check|chk|ck)\s*(?:no\.?|number)?\s*#?\s*(\d{2,})\b", re.I)
+# Money Box category -> tax category for the bank row
+MONEY_BOX_CATEGORY = {"vendor_payment": "Inventory", "other_expense": "Other"}
+
+
+def bank_check_number(description: Optional[str]) -> Optional[str]:
+    m = _BANK_CHECK_RE.match(description or "")
+    return m.group(1).lstrip("0") or "0" if m else None
+
+
+def money_check_number(note: Optional[str]) -> Optional[str]:
+    m = _MONEY_CHECK_RE.search(note or "")
+    return m.group(1).lstrip("0") or "0" if m else None
+
+
+def money_check_payee(note: Optional[str]) -> Optional[str]:
+    """'Check #27341 · Corona' -> 'Corona'."""
+    text = _MONEY_CHECK_RE.sub("", note or "", count=1)
+    text = re.sub(r"^[\s·\-–—:|,]+", "", text).strip()
+    return text or None
+
+
+def match_checks(supabase, business_id: str, txns: Optional[list] = None) -> int:
+    """Link bank checks to Money Box checks with the same number and an
+    amount within $1. Only charges still waiting for the owner are touched
+    (needs_receipt, not hand-edited, no receipt). Ambiguous numbers are left
+    alone. Updates `txns` in place when given. Returns how many matched."""
+    if txns is None:
+        txns = supabase.table("rv_bank_transactions").select("*").eq("business_id", business_id).execute().data or []
+    waiting = [t for t in txns if float(t.get("amount") or 0) < 0 and t.get("status") == "needs_receipt"
+               and not t.get("matched_money_entry_id") and not t.get("matched_receipt_id")
+               and t.get("category_source") != "user" and bank_check_number(t.get("description"))]
+    if not waiting:
+        return 0
+    entries = (
+        supabase.table("rv_money_entries").select("*").eq("business_id", business_id).eq("entry_type", "expense").execute()
+    ).data or []
+    by_number = {}
+    for e in entries:
+        num = money_check_number(e.get("note"))
+        if num:
+            by_number.setdefault(num, []).append(e)
+    if not by_number:
+        return 0
+    linked = supabase.table("rv_bank_transactions").select("matched_money_entry_id").eq("business_id", business_id).execute().data or []
+    taken = {str(r["matched_money_entry_id"]) for r in linked if r.get("matched_money_entry_id")}
+
+    n = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for t in waiting:
+        amount = abs(float(t.get("amount") or 0))
+        close = [e for e in by_number.get(bank_check_number(t.get("description")), [])
+                 if str(e["id"]) not in taken and abs(float(e.get("amount") or 0) - amount) < CHECK_AMOUNT_TOLERANCE]
+        if len(close) != 1:
+            continue  # none, or two Money Box checks with that number: leave it for the owner
+        e = close[0]
+        category = MONEY_BOX_CATEGORY.get(e.get("category"), "Other")
+        data = {
+            "matched_money_entry_id": e["id"], "status": "ignored",
+            "vendor": money_check_payee(e.get("note")) or t.get("vendor"),
+            "category": category, "schedule_c_line": line_for(category), "category_source": "money_box", "updated_at": now,
+        }
+        supabase.table("rv_bank_transactions").update(data).eq("id", t["id"]).execute()
+        t.update(data)
+        taken.add(str(e["id"]))
+        n += 1
+    return n
+
+
+def unlink_money_check(supabase, txn: dict, by_owner: bool = True):
+    """Undo a check match: the charge goes back to the owner's list. When the
+    owner says "not the same check", it won't be auto-matched again."""
+    data = {"matched_money_entry_id": None, "status": "needs_receipt", "vendor": None,
+            "category_source": "user" if by_owner else "none", "updated_at": datetime.now(timezone.utc).isoformat()}
+    supabase.table("rv_bank_transactions").update(data).eq("id", txn["id"]).execute()
+    txn.update(data)
 
 
 # ── Reporting helpers (P&L, tax, accountant PDF, CSV) ───────────────────────

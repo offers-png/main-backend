@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from supabase import create_client
 from routes.receiptvault.routes import get_current_user, resolve_module_access, plan_feature
 from routes.receiptvault.files import sign, sign_one, UPLOAD_CACHE_SECONDS
+from routes.receiptvault import bank_core
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -149,6 +150,11 @@ async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_cur
     result = supabase.table("rv_money_entries").insert(data).execute()
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to save entry")
+    if body.entryType == "expense" and bank_core.money_check_number(body.note):
+        try:  # a check the bank already showed: link it now
+            bank_core.match_checks(supabase, business["id"])
+        except Exception as e:
+            print(f"[money] check matching failed: {e}")
     return to_entry(result.data[0])
 
 
@@ -156,6 +162,13 @@ async def create_money_entry(body: CreateEntryBody, current_user=Depends(get_cur
 async def delete_money_entry(entry_id: str, current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business = resolve_module_access(supabase, current_user.user.id, "money_box")
+    # A bank check linked to this entry goes back to the owner's list
+    linked = (
+        supabase.table("rv_bank_transactions").select("*").eq("business_id", business["id"])
+        .eq("matched_money_entry_id", entry_id).execute()
+    ).data or []
+    for t in linked:
+        bank_core.unlink_money_check(supabase, t, by_owner=False)
     result = supabase.table("rv_money_entries").delete()\
         .eq("id", entry_id).eq("business_id", business["id"]).execute()
     if not result.data:

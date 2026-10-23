@@ -185,6 +185,7 @@ async def confirm_statement(upload_id: str, body: ConfirmBody, current_user=Depe
         "imported": result["imported"],
         "duplicates": result["duplicates"],
         "matched": result["matched"],
+        "checksMatched": result.get("checksMatched", 0),
         "needsReceipt": needs,
     }
 

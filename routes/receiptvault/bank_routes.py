@@ -139,6 +139,7 @@ async def list_transactions(
     supabase = get_supabase()
     business, _role = bank_store(supabase, current_user)
     all_rows = _all_rows(supabase, business["id"])
+    bank_core.match_checks(supabase, business["id"], all_rows)
     bank_core.apply_known_vendors(supabase, all_rows)
     rows = all_rows
     if status == "needs_receipt":
@@ -279,6 +280,18 @@ async def bulk_update(body: BulkBody, current_user=Depends(get_current_user)):
                 also += bank_core.apply_rule_to_existing(
                     supabase, business["id"], pattern, category=category, is_personal=body.isPersonal, skip_id=t["id"])
     return {"updated": len(txns), "alsoUpdated": also, "vendorsLearned": len(learned)}
+
+
+@bank_routes.delete("/bank/transactions/{txn_id}/money-match")
+async def unlink_money_check(txn_id: str, current_user=Depends(get_current_user)):
+    """'Not the same check': back to the owner's list, never re-matched."""
+    supabase = get_supabase()
+    business, _role = bank_store(supabase, current_user)
+    txn = _get_txn(supabase, business["id"], txn_id)
+    if not txn.get("matched_money_entry_id"):
+        raise HTTPException(status_code=400, detail="This charge isn't linked to a Money Box check.")
+    bank_core.unlink_money_check(supabase, txn)
+    return _with_receipts(supabase, business["id"], [_get_txn(supabase, business["id"], txn_id)])[0]
 
 
 class MatchBody(BaseModel):
