@@ -8,8 +8,8 @@ Owners, managers and bookkeepers only — employees never see bank data.
 
 import base64 as b64lib
 import os
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import date, datetime, timezone
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -62,6 +62,69 @@ def _with_receipts(supabase, business_id: str, txns: list) -> list:
     return out
 
 
+def _all_rows(supabase, business_id: str) -> list:
+    """Every charge for the store (paged: the database returns 1000 at a time)."""
+    out, page = [], 1000
+    while True:
+        chunk = (
+            supabase.table("rv_bank_transactions").select("*").eq("business_id", business_id)
+            .order("posted_date", desc=True).range(len(out), len(out) + page - 1).execute()
+        ).data or []
+        out += chunk
+        if len(chunk) < page:
+            return out
+
+
+def _is_big_business_charge(r: dict) -> bool:
+    """A business charge the IRS wants a receipt for, with or without one."""
+    if r.get("status") not in ("needs_receipt", "matched"):
+        return False
+    return abs(float(r.get("amount") or 0)) >= bank_core.RECEIPT_THRESHOLD or r.get("category") in bank_core.ALWAYS_NEEDS_RECEIPT
+
+
+def _goal(rows: list, today: Optional[date] = None) -> dict:
+    """This month's goal: big charges that still need a receipt. If nothing
+    has come in for this month yet (statements lag), use the newest month
+    that has charges."""
+    today = today or date.today()
+    month = today.strftime("%Y-%m")
+    big = [r for r in rows if _is_big_business_charge(r)]
+    months = sorted({str(r.get("posted_date") or "")[:7] for r in big if r.get("posted_date")})
+    if month not in months and months:
+        month = months[-1]
+    in_month = [r for r in big if str(r.get("posted_date") or "")[:7] == month]
+    need = [r for r in in_month if r.get("status") == "needs_receipt"]
+    earlier = [r for r in big if r.get("status") == "needs_receipt" and str(r.get("posted_date") or "")[:7] < month]
+    return {
+        "month": month,
+        "isCurrentMonth": month == today.strftime("%Y-%m"),
+        "needReceipt": len(need),
+        "needReceiptAmount": round(sum(abs(float(r.get("amount") or 0)) for r in need), 2),
+        "haveReceipt": len(in_month) - len(need),
+        "bigCharges": len(in_month),
+        "earlier": len(earlier),
+        "threshold": bank_core.RECEIPT_THRESHOLD,
+    }
+
+
+def _counts(rows: list, today: Optional[date] = None) -> dict:
+    counts = {"needsReceipt": 0, "matched": 0, "personal": 0, "ignored": 0, "total": len(rows),
+              "needsReceiptAmount": 0.0, "noReceiptNeeded": 0}
+    for r in rows:
+        st = r.get("status")
+        if st == "needs_receipt":
+            if bank_core.receipt_required(r):
+                counts["needsReceipt"] += 1
+                counts["needsReceiptAmount"] += abs(float(r.get("amount") or 0))
+            else:
+                counts["noReceiptNeeded"] += 1
+        elif st in ("matched", "personal", "ignored"):
+            counts[st] += 1
+    counts["needsReceiptAmount"] = round(counts["needsReceiptAmount"], 2)
+    counts["goal"] = _goal(rows, today)
+    return counts
+
+
 @bank_routes.get("/bank/transactions")
 async def list_transactions(
     status: Optional[str] = None,
@@ -71,48 +134,43 @@ async def list_transactions(
     limit: int = 300,
     current_user=Depends(get_current_user),
 ):
+    """status: needs_receipt (only the ones the IRS wants a receipt for),
+    no_receipt_needed (business charges under $75), matched, personal, ignored."""
     supabase = get_supabase()
     business, _role = bank_store(supabase, current_user)
-    query = supabase.table("rv_bank_transactions").select("*").eq("business_id", business["id"])
-    if status:
-        query = query.eq("status", status)
+    all_rows = _all_rows(supabase, business["id"])
+    bank_core.apply_known_vendors(supabase, all_rows)
+    rows = all_rows
+    if status == "needs_receipt":
+        rows = [r for r in rows if bank_core.receipt_required(r)]
+    elif status == "no_receipt_needed":
+        rows = [r for r in rows if r.get("status") == "needs_receipt" and not bank_core.receipt_required(r)]
+    elif status:
+        rows = [r for r in rows if r.get("status") == status]
     if start:
-        query = query.gte("posted_date", start)
+        rows = [r for r in rows if str(r.get("posted_date") or "") >= start]
     if end:
-        query = query.lte("posted_date", end)
+        rows = [r for r in rows if str(r.get("posted_date") or "") <= end]
     if q:
-        query = query.ilike("description", f"%{q}%")
-    rows = query.order("posted_date", desc=True).limit(max(1, min(limit, 1000))).execute().data or []
-    return {"transactions": _with_receipts(supabase, business["id"], rows), "counts": _counts(supabase, business["id"])}
-
-
-def _counts(supabase, business_id: str) -> dict:
-    rows = supabase.table("rv_bank_transactions").select("status, amount, is_personal").eq("business_id", business_id).execute().data or []
-    counts = {"needsReceipt": 0, "matched": 0, "personal": 0, "ignored": 0, "total": len(rows), "needsReceiptAmount": 0.0}
-    for r in rows:
-        st = r.get("status")
-        if st == "needs_receipt":
-            counts["needsReceipt"] += 1
-            counts["needsReceiptAmount"] += abs(float(r.get("amount") or 0))
-        elif st in ("matched", "personal", "ignored"):
-            counts[st] += 1
-    counts["needsReceiptAmount"] = round(counts["needsReceiptAmount"], 2)
-    return counts
+        rows = [r for r in rows if q.lower() in (r.get("description") or "").lower()]
+    rows = sorted(rows, key=lambda r: (str(r.get("posted_date") or ""), str(r.get("created_at") or "")), reverse=True)
+    rows = rows[: max(1, min(limit, 1000))]
+    return {"transactions": _with_receipts(supabase, business["id"], rows), "counts": _counts(all_rows)}
 
 
 @bank_routes.get("/bank/missing-receipts")
 async def missing_receipts(current_user=Depends(get_current_user)):
-    """Business charges with no receipt yet, newest first."""
+    """This month's goal: big business charges with no receipt yet."""
     supabase = get_supabase()
     business, _role = bank_store(supabase, current_user)
-    rows = (
-        supabase.table("rv_bank_transactions").select("*").eq("business_id", business["id"])
-        .eq("status", "needs_receipt").order("posted_date", desc=True).limit(500).execute()
-    ).data or []
+    rows = _all_rows(supabase, business["id"])
+    goal = _goal(rows)
+    need = [r for r in rows if bank_core.receipt_required(r) and str(r.get("posted_date") or "")[:7] == goal["month"]]
     return {
-        "count": len(rows),
-        "total": round(sum(abs(float(r.get("amount") or 0)) for r in rows), 2),
-        "transactions": [bank_core.to_txn(r) for r in rows],
+        "count": goal["needReceipt"],
+        "total": goal["needReceiptAmount"],
+        "goal": goal,
+        "transactions": [bank_core.to_txn(r) for r in need],
     }
 
 
@@ -124,11 +182,10 @@ class UpdateTxnBody(BaseModel):
     applyToVendor: bool = True
 
 
-@bank_routes.patch("/bank/transactions/{txn_id}")
-async def update_transaction(txn_id: str, body: UpdateTxnBody, current_user=Depends(get_current_user)):
-    supabase = get_supabase()
-    business, _role = bank_store(supabase, current_user)
-    txn = _get_txn(supabase, business["id"], txn_id)
+def _change(supabase, txn: dict, body) -> Optional[str]:
+    """Apply a category / personal / already-counted change to one charge.
+    Returns the new category (or None)."""
+    txn_id = txn["id"]
     amount = float(txn.get("amount") or 0)
     data = {"updated_at": datetime.now(timezone.utc).isoformat()}
 
@@ -157,6 +214,15 @@ async def update_transaction(txn_id: str, body: UpdateTxnBody, current_user=Depe
         data["status"] = "ignored"
 
     supabase.table("rv_bank_transactions").update(data).eq("id", txn_id).execute()
+    return category
+
+
+@bank_routes.patch("/bank/transactions/{txn_id}")
+async def update_transaction(txn_id: str, body: UpdateTxnBody, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    business, _role = bank_store(supabase, current_user)
+    txn = _get_txn(supabase, business["id"], txn_id)
+    category = _change(supabase, txn, body)
 
     # Remember the choice for this vendor and re-sort its other charges
     updated_others = 0
@@ -170,6 +236,49 @@ async def update_transaction(txn_id: str, body: UpdateTxnBody, current_user=Depe
     out = _with_receipts(supabase, business["id"], [fresh])[0]
     out["alsoUpdated"] = updated_others
     return out
+
+
+class BulkBody(BaseModel):
+    ids: List[str]
+    category: Optional[str] = None
+    isPersonal: Optional[bool] = None
+    ignored: Optional[bool] = None          # "Already counted"
+    applyToVendor: bool = True
+
+
+@bank_routes.post("/bank/transactions/bulk")
+async def bulk_update(body: BulkBody, current_user=Depends(get_current_user)):
+    """Select many -> set category / mark personal / already counted.
+    Each vendor's choice is remembered, like a single edit."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="Pick at least one charge.")
+    if len(body.ids) > 500:
+        raise HTTPException(status_code=400, detail="Pick 500 charges or fewer at a time.")
+    if body.category is None and body.isPersonal is None and body.ignored is None:
+        raise HTTPException(status_code=400, detail="Pick what to change.")
+    supabase = get_supabase()
+    business, _role = bank_store(supabase, current_user)
+    ids = list(dict.fromkeys(body.ids))
+    txns = supabase.table("rv_bank_transactions").select("*").eq("business_id", business["id"]).in_("id", ids).execute().data or []
+    # Money in has no expense category, so a category change skips deposits
+    txns = [t for t in txns if body.category is None or float(t.get("amount") or 0) < 0]
+    change = UpdateTxnBody(category=body.category, isPersonal=body.isPersonal, ignored=body.ignored)
+    category = None
+    for t in txns:
+        category = _change(supabase, t, change)
+
+    learned, also = set(), 0
+    if body.applyToVendor and (body.category is not None or body.isPersonal is not None):
+        for t in txns:
+            key = bank_core.vendor_key(t.get("description"))
+            if not key or key in learned:
+                continue
+            pattern = bank_core.save_rule(supabase, business["id"], t.get("description"), category=category, is_personal=body.isPersonal)
+            if pattern:
+                learned.add(pattern)
+                also += bank_core.apply_rule_to_existing(
+                    supabase, business["id"], pattern, category=category, is_personal=body.isPersonal, skip_id=t["id"])
+    return {"updated": len(txns), "alsoUpdated": also, "vendorsLearned": len(learned)}
 
 
 class MatchBody(BaseModel):

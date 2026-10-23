@@ -180,7 +180,7 @@ async def confirm_statement(upload_id: str, body: ConfirmBody, current_user=Depe
         "imported_count": result["imported"], "duplicate_count": result["duplicates"],
     }).eq("id", upload_id).execute()
     supabase.table("rv_bank_accounts").update({"last_synced_at": now}).eq("id", account["id"]).execute()
-    needs = sum(1 for t in result["transactions"] if t.get("status") == "needs_receipt")
+    needs = sum(1 for t in result["transactions"] if bank_core.receipt_required(t))
     return {
         "imported": result["imported"],
         "duplicates": result["duplicates"],

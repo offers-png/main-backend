@@ -10,6 +10,9 @@ Pipeline for every batch of incoming transactions:
 
 Amounts: negative = money out, positive = money in.
 Statuses: needs_receipt | matched | personal | ignored.
+"needs_receipt" means "business charge with no receipt yet". Only the ones
+the IRS actually wants a receipt for ($75 and over, or any hotel/travel
+charge) are flagged to the owner: see receipt_required().
 Deposits (money in) are NOT counted as income unless the owner says so
 (counts_as_income) — sales are already tracked in Money Box, and counting
 both would double the income and the tax estimate.
@@ -30,6 +33,12 @@ from routes.receiptvault.categories import (
     normalize_category,
     prompt_category_list,
 )
+
+# The IRS doesn't need a receipt for a business expense under $75 (the bank
+# record is enough), except lodging, which always needs one. Travel charges
+# are kept on the list at any amount so hotel stays aren't missed.
+RECEIPT_THRESHOLD = 75.0
+ALWAYS_NEEDS_RECEIPT = {"Travel"}
 
 MATCH_AMOUNT_TOLERANCE = 0.01
 MATCH_DAYS = 5
@@ -87,6 +96,50 @@ def is_transfer(description: str) -> bool:
     return bool(_TRANSFER_RE.search(description or ""))
 
 
+# Obvious vendors, sorted without the AI (and fixing older AI guesses).
+# Checked after the store's own rules, so the owner's choices always win.
+# Each name must start a word; names in _WHOLE must also end one ("shell" but
+# not "shelly", "rent" but not "rental"). Banks glue words together
+# ("E-Z*PASSNY", "NGRID0000"), so the others may run on.
+_KNOWN_VENDORS = [
+    ("Insurance", ["insurance", "ins co", "geico", "state farm", "progressive", "allstate", "liberty mutual",
+                   "nationwide", "travelers ins", "hiscox", "next insurance", "the hartford", "erie ins"]),
+    ("Vehicle & Fuel", [r"e-?\s?z\W?\s?pass", "toll", "tolls", "thruway", "turnpike", "parking", "parkmobile",
+                        "speedway", "fastrac", "citgo", "shell", "exxon", "mobil", "sunoco", "bp", "chevron",
+                        "valero", "hess", "getty", "marathon petro", "kwik fill", "costco gas", "gas station",
+                        "gasoline", "fuel"]),
+    ("Utilities", ["ngrid", "national grid", "con ed", "coned", "consolidated edison", "pseg", "nyseg", "rg&e",
+                   "eversource", "duke energy", r"water (dept|authority|bill|board)", "sewer", "verizon", "at&t",
+                   r"t-?mobile", "spectrum", "charter comm", "optimum", "comcast", "xfinity", "cricket wireless",
+                   "boost mobile", r"metro ?pcs", "frontier comm", "mint mobile", "vonage"]),
+    ("Rent", ["rent", "rent payment", r"lease (pmt|payment)", "appfolio", "buildium", r"property (mgmt|management)"]),
+]
+_WHOLE = {"toll", "tolls", "shell", "mobil", "bp", "hess", "getty", "fuel", "rent", "parking", "optimum", "spectrum"}
+
+
+def _vendor_re(names: list):
+    parts = [rf"(?<![a-z0-9]){n}" + (r"(?![a-z0-9])" if n in _WHOLE else "") for n in names]
+    return re.compile("|".join(parts), re.I)
+
+
+_KNOWN_RES = [(cat, _vendor_re(names)) for cat, names in _KNOWN_VENDORS]
+
+
+def known_vendor_category(description: Optional[str]) -> Optional[str]:
+    text = description or ""
+    for cat, rx in _KNOWN_RES:
+        if rx.search(text):
+            return cat
+    return None
+
+
+def receipt_required(row: dict) -> bool:
+    """Does this charge need a receipt the IRS would ask for?"""
+    if row.get("status") != "needs_receipt":
+        return False
+    return abs(float(row.get("amount") or 0)) >= RECEIPT_THRESHOLD or row.get("category") in ALWAYS_NEEDS_RECEIPT
+
+
 def initial_status(amount: float, is_personal: bool = False, category: Optional[str] = None) -> str:
     if is_personal:
         return "personal"
@@ -111,6 +164,7 @@ def to_txn(row: dict) -> dict:
         "countsAsIncome": bool(row.get("counts_as_income")),
         "matchedReceiptId": row.get("matched_receipt_id"),
         "status": row.get("status"),
+        "receiptRequired": receipt_required(row),
         "categorySource": row.get("category_source"),
         "createdAt": str(row.get("created_at") or ""),
     }
@@ -191,7 +245,19 @@ def apply_rule_to_existing(supabase, business_id: str, pattern: str, category: O
 
 # ── AI categorize ───────────────────────────────────────────────────────────
 
-async def ai_categorize(items: list) -> dict:
+def learned_examples(rules: list, limit: int = 40) -> str:
+    """The owner's own vendor choices, shown to the AI as examples so similar
+    vendors are sorted the same way."""
+    lines = []
+    for r in rules[:limit]:
+        if r.get("is_personal"):
+            continue
+        if r.get("vendor_pattern") and r.get("category"):
+            lines.append(f'- "{r["vendor_pattern"]}" -> {r["category"]}')
+    return "\n".join(lines)
+
+
+async def ai_categorize(items: list, examples: str = "") -> dict:
     """items: [{"i": index, "description": str, "amount": float}] ->
     {index: category}. Uses the same AI provider/key as receipt reading.
     Returns {} (everything left as 'Other') if the AI isn't available."""
@@ -208,6 +274,7 @@ CATEGORIES (use the exact name):
 {prompt_category_list()}
 - {TRANSFER}: money moving between the owner's own accounts, credit card payments, transfers, loan principal. Not an expense.
 
+{("This owner has sorted these vendors themselves. Follow the same choices for the same or similar vendors:" + chr(10) + examples + chr(10)) if examples else ""}
 Each line below is: id<TAB>amount (negative = money out)<TAB>bank description.
 Return ONLY a JSON object mapping each id to a category name, e.g. {{"0": "Inventory", "1": "Utilities"}}.
 
@@ -296,10 +363,14 @@ async def import_transactions(supabase, business: dict, txns: list, *, source: s
     ai_needed = []
     for i, r in enumerate(new_rows):
         rule = find_rule(rules, r["description"]) if auto else None
+        known = known_vendor_category(r["description"]) if auto and r["amount"] < 0 else None
         if rule:
             r["category"] = rule.get("category")
             r["is_personal"] = bool(rule.get("is_personal"))
             r["category_source"] = "rule"
+        elif known:
+            r["category"] = known
+            r["category_source"] = "known"
         elif is_transfer(r["description"]):
             r["category"] = TRANSFER
             r["category_source"] = "rule"
@@ -310,7 +381,7 @@ async def import_transactions(supabase, business: dict, txns: list, *, source: s
             r["category_source"] = r.get("category_source") or "none"
 
     if ai_needed:
-        guesses = await ai_categorize(ai_needed)
+        guesses = await ai_categorize(ai_needed, learned_examples(rules))
         for it in ai_needed:
             r = new_rows[it["i"]]
             r["category"] = guesses.get(it["i"], "Other")
@@ -472,6 +543,29 @@ def receipt_candidates(supabase, business_id: str, txn: dict, limit: int = 10) -
         return (abs(ra - amt) > MATCH_AMOUNT_TOLERANCE, abs(ra - amt), abs((rd - td).days))
 
     return sorted([r for r in receipts if r["id"] not in taken], key=rank)[:limit]
+
+
+def apply_known_vendors(supabase, rows: list) -> int:
+    """Fix older automatic guesses for obvious vendors (E-ZPass, gas,
+    utilities, phone, insurance, rent). Never touches anything the owner
+    sorted or a vendor rule set. Updates `rows` in place."""
+    n = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        if float(r.get("amount") or 0) >= 0 or r.get("category_source") not in (None, "ai", "none"):
+            continue
+        if r.get("category") == TRANSFER or r.get("status") in ("personal", "ignored"):
+            continue
+        cat = known_vendor_category(r.get("description"))
+        if not cat:
+            continue
+        data = {"category": cat, "schedule_c_line": line_for(cat), "category_source": "known", "updated_at": now}
+        if r.get("category") == cat:
+            data = {"category_source": "known", "updated_at": now}
+        supabase.table("rv_bank_transactions").update(data).eq("id", r["id"]).execute()
+        r.update(data)
+        n += 1
+    return n
 
 
 # ── Reporting helpers (P&L, tax, accountant PDF, CSV) ───────────────────────
