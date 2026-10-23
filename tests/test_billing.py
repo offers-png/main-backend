@@ -254,3 +254,11 @@ def test_webhook_accepts_either_secret_name(client, monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT", "whsec_wrong_one")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_ReceiptVault", SECRET)
     send_event(client, "invoice.paid", {"customer": "cus_none"})
+
+
+def test_webhook_for_deleted_account_recreates_nothing(client, db):
+    gone = "99999999-9999-9999-9999-999999999999"
+    sub = {"id": "sub_gone", "customer": "cus_gone", "status": "active", "metadata": {"owner_user_id": gone},
+           "items": {"data": [{"id": "si", "price": {"id": "price_basic"}, "quantity": 1}]}}
+    send_event(client, "customer.subscription.created", sub)
+    assert not [a for a in db.tables.get("rv_accounts", []) if a["owner_user_id"] == gone]

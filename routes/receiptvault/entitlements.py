@@ -547,6 +547,11 @@ def apply_subscription(supabase, subscription: dict, owner_user_id: Optional[str
     if not owner:
         print(f"[billing] subscription {subscription.get('id')} has no matching account")
         return None
+    # A deleted account (or another app's customer): don't recreate anything
+    known = supabase.table("rv_accounts").select("owner_user_id").eq("owner_user_id", owner).execute().data
+    if not known and not owned_stores(supabase, owner):
+        print(f"[billing] subscription {subscription.get('id')} is for an account that no longer exists — ignored")
+        return None
 
     status = subscription.get("status")
     plan, extra = None, 0
