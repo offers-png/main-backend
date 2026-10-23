@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from supabase import create_client
 
 from routes.receiptvault.routes import get_current_user, resolve_role, resolve_module_access, plan_feature, require_writable_store
+from routes.receiptvault.files import UPLOAD_CACHE_SECONDS
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 SUPABASE_KEY = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6Y3V6eW91eW1hdW9raWphcWprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDUyMDAsImV4cCI6MjA4OTUyMTIwMH0.fDuyCZGrCbL9Obd7l6FDnNd5AB-AUytp-3S60KwwKvM")
@@ -154,7 +155,7 @@ async def submit_dropbox(token: str, request: Request):
             ext = os.path.splitext(file_item.filename or "")[1] or ".bin"
             object_path = f"dropbox-submissions/{business_id}/{token}/{int(time.time() * 1000)}-{secrets.token_hex(4)}{ext}"
             supabase.storage.from_("receipts").upload(
-                object_path, content, {"content-type": file_item.content_type or "application/octet-stream"}
+                object_path, content, {"content-type": file_item.content_type or "application/octet-stream", "cache-control": UPLOAD_CACHE_SECONDS}
             )
             uploaded_files.append({
                 "name": file_item.filename,

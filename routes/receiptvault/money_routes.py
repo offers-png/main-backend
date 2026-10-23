@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 from routes.receiptvault.routes import get_current_user, resolve_module_access, plan_feature
-from routes.receiptvault.files import sign, sign_one
+from routes.receiptvault.files import sign, sign_one, UPLOAD_CACHE_SECONDS
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -336,7 +336,7 @@ async def generate_money_packet(body: PacketRequestBody, current_user=Depends(ge
 
     filename = f"money-packets/{business['id']}/{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
     supabase.storage.from_("receipts").upload(
-        filename, pdf_bytes, {"content-type": "application/pdf"}
+        filename, pdf_bytes, {"content-type": "application/pdf", "cache-control": UPLOAD_CACHE_SECONDS}
     )
     file_url = f"{SUPABASE_URL}/storage/v1/object/public/receipts/{filename}"
 

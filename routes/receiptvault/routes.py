@@ -30,7 +30,7 @@ receipt_routes = APIRouter(prefix="/api", tags=["receiptvault"])
 
 _supabase_client = None
 
-from routes.receiptvault.files import sign_receipts  # noqa: E402  (private bucket -> signed links)
+from routes.receiptvault.files import sign_receipts, UPLOAD_CACHE_SECONDS  # noqa: E402  (private bucket -> signed links)
 
 # One shared category list with Schedule C lines — see categories.py.
 from routes.receiptvault.categories import (  # noqa: E402
@@ -874,7 +874,7 @@ async def save_receipt(supabase, business: dict, *, content: bytes, original_nam
 
     # Upload to Supabase Storage
     unique = f"{int(time.time() * 1000)}-{random.randint(0, 999999999)}{ext}"
-    supabase.storage.from_("receipts").upload(unique, content, {"content-type": mime})
+    supabase.storage.from_("receipts").upload(unique, content, {"content-type": mime, "cache-control": UPLOAD_CACHE_SECONDS})
     file_url = f"{supabase_url}/storage/v1/object/public/receipts/{unique}"
 
     # Read it with AI (if that fails, the receipt still saves)

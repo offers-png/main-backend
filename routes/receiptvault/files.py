@@ -14,6 +14,9 @@ from typing import Iterable, Optional
 BUCKET = "receipts"
 IN_APP_SECONDS = 60 * 60
 SHARE_SECONDS = 30 * 24 * 60 * 60
+# How long the storage CDN may keep a copy (string, as Supabase expects).
+# Short, so a deleted file stops being reachable via an old link quickly.
+UPLOAD_CACHE_SECONDS = "300"
 _MARKERS = ("/storage/v1/object/public/receipts/", "/storage/v1/object/sign/receipts/", "/storage/v1/object/receipts/")
 
 

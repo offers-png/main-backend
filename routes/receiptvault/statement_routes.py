@@ -24,6 +24,7 @@ from routes.receiptvault.routes import get_current_user, get_supabase as _rv_get
 from routes.receiptvault.bank_routes import bank_store
 from routes.receiptvault import bank_core, statement_parser as sp
 from routes.receiptvault.entitlements import check_statement_upload_allowed
+from routes.receiptvault.files import UPLOAD_CACHE_SECONDS
 
 statement_routes = APIRouter(prefix="/api", tags=["statements"])
 MAX_BYTES = 10 * 1024 * 1024
@@ -106,7 +107,7 @@ async def preview_statement(request: Request, current_user=Depends(get_current_u
     # Store the original file + the parsed rows; nothing is imported yet
     object_path = f"statements/{business['id']}/{int(time.time() * 1000)}-{secrets.token_hex(4)}{ext or ('.pdf' if is_pdf else '.csv')}"
     try:
-        supabase.storage.from_("receipts").upload(object_path, raw, {"content-type": "application/pdf" if is_pdf else "text/csv"})
+        supabase.storage.from_("receipts").upload(object_path, raw, {"content-type": "application/pdf" if is_pdf else "text/csv", "cache-control": UPLOAD_CACHE_SECONDS})
     except Exception as e:
         print(f"[statement] storing original failed (continuing): {e}")
         object_path = None
