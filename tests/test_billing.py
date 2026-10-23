@@ -242,3 +242,15 @@ def test_month_start_respects_time_zone():
     now = datetime(2026, 11, 1, 2, 0, tzinfo=timezone.utc)
     assert month_start_utc("America/New_York", now) == "2026-10-01T04:00:00"
     assert month_start_utc("UTC", now) == "2026-11-01T00:00:00"
+
+
+def test_webhook_secret_with_pasted_whitespace_still_works(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT", f"  {SECRET}\n")
+    s = make_first_store(client)
+    send_event(client, "invoice.paid", {"customer": "cus_none"})  # asserts 200
+
+
+def test_webhook_accepts_either_secret_name(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT", "whsec_wrong_one")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET_ReceiptVault", SECRET)
+    send_event(client, "invoice.paid", {"customer": "cus_none"})

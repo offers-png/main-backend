@@ -33,8 +33,16 @@ def get_supabase():
     return _rv_get_supabase()
 
 
-def webhook_secret() -> str:
-    return os.getenv("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT") or os.getenv("STRIPE_WEBHOOK_SECRET_ReceiptVault", "")
+def webhook_secrets() -> list:
+    """Signing secrets to accept. Whitespace is trimmed (a pasted trailing
+    space or newline would otherwise reject every event) and both env var
+    names are tried."""
+    out = []
+    for name in ("STRIPE_WEBHOOK_SECRET_RECEIPTKEPT", "STRIPE_WEBHOOK_SECRET_ReceiptVault"):
+        v = (os.getenv(name) or "").strip().strip('"').strip("'")
+        if v and v not in out:
+            out.append(v)
+    return out
 
 
 def _owner_account_or_403(supabase, current_user):
@@ -243,11 +251,13 @@ def verify_stripe_signature(payload: bytes, sig_header: str, secret: str, now: f
 @billing_routes.post("/billing/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
-    secret = webhook_secret()
-    if not secret:
+    secrets_ = webhook_secrets()
+    if not secrets_:
         print("[billing] webhook secret not configured — rejecting event")
         raise HTTPException(status_code=500, detail="Webhook not configured")
-    if not verify_stripe_signature(payload, request.headers.get("stripe-signature", ""), secret):
+    sig = request.headers.get("stripe-signature", "")
+    if not any(verify_stripe_signature(payload, sig, s) for s in secrets_):
+        print(f"[billing] invalid webhook signature (checked {len(secrets_)} configured secret(s))")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     event = json.loads(payload)
