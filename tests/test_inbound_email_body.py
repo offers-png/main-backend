@@ -68,3 +68,26 @@ def test_missing_key_fails_clearly_and_a_replay_works(client, db, store, http_ca
     # a third delivery of a processed email is still a duplicate
     post_event(client, event(addr, email_id="em_9"))
     assert len(db.tables["receipts"]) == 1
+
+
+def test_email_list_and_delete_never_touches_receipts(client, db, store, http_calls):
+    world(http_calls, {"merchant": "Pepsi", "amount": 50.0, "receipt_date": None, "category": "Inventory"}, text="Pepsi total $50.00")
+    addr = address(client, store)
+    for i in range(3):
+        post_event(client, event(addr, email_id=f"em_{i}"))
+    h = as_user(OWNER, store)
+    items = client.get("/api/inbound/emails", headers=h).json()
+    assert len(items) == 3 and len(db.tables["receipts"]) == 3
+
+    assert client.delete(f"/api/inbound/emails/{items[0]['id']}", headers=h).json() == {"deleted": 1}
+    r = client.post("/api/inbound/emails/delete", json={"ids": [items[1]["id"], items[2]["id"], "not-mine"]}, headers=h)
+    assert r.json() == {"deleted": 2}
+    assert client.get("/api/inbound/emails", headers=h).json() == []
+    assert len(db.tables["receipts"]) == 3                       # receipts stay
+    assert client.delete("/api/inbound/emails/nope", headers=h).status_code == 404
+    assert client.post("/api/inbound/emails/delete", json={"ids": []}, headers=h).status_code == 400
+
+    # another store's entries can't be deleted
+    db.tables["rv_inbound_emails"].append({"id": "other", "business_id": "other-store", "status": "processed"})
+    assert client.post("/api/inbound/emails/delete", json={"ids": ["other"]}, headers=h).json() == {"deleted": 0}
+    assert any(e["id"] == "other" for e in db.tables["rv_inbound_emails"])

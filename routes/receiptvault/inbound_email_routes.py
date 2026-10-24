@@ -15,6 +15,10 @@ Inbound, which POSTs an `email.received` webhook here. We then:
   GET  /api/inbound/address         -> this store's address (created on first view)
   POST /api/inbound/address/rotate  -> new address (old one stops working)
   GET  /api/inbound/recent          -> last forwarded emails
+  GET  /api/inbound/emails          -> received emails (Email Receipts page)
+  DELETE /api/inbound/emails/{id}   -> remove one entry from the list
+  POST /api/inbound/emails/delete   -> remove many ({"ids": [...]})
+  Deleting an entry never deletes a receipt already saved from it.
   POST /api/inbound/resend          -> Resend webhook (public, signed)
 """
 
@@ -26,10 +30,11 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
 from routes.receiptvault.routes import (
     get_current_user, get_supabase as _rv_get_supabase, save_receipt, to_receipt, extract_receipt_data, _email_text,
@@ -107,14 +112,67 @@ async def rotate_address(current_user=Depends(get_current_user)):
     return {"address": address_for(token)}
 
 
+def _email_rows(supabase, business_id: str, limit: int) -> list:
+    return (
+        supabase.table("rv_inbound_emails").select("*").eq("business_id", business_id)
+        .order("created_at", desc=True).limit(limit).execute()
+    ).data or []
+
+
 @inbound_routes.get("/inbound/recent")
 async def recent(current_user=Depends(get_current_user)):
     supabase = get_supabase()
     business, _role = _staff_store(supabase, current_user)
-    rows = (
-        supabase.table("rv_inbound_emails").select("*").eq("business_id", business["id"])
-        .order("created_at", desc=True).limit(10).execute()
-    ).data or []
+    return _to_items(_email_rows(supabase, business["id"], 10))
+
+
+@inbound_routes.get("/inbound/emails")
+async def list_emails(limit: int = 100, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    business, _role = _staff_store(supabase, current_user)
+    return _to_items(_email_rows(supabase, business["id"], max(1, min(limit, 500))))
+
+
+def _delete_entries(supabase, business_id: str, ids: list) -> int:
+    """Only the list entries go. Receipts saved from these emails stay:
+    nothing here touches the receipts table or storage."""
+    ids = [i for i in dict.fromkeys(ids) if i]
+    if not ids:
+        return 0
+    found = supabase.table("rv_inbound_emails").select("id").eq("business_id", business_id).in_("id", ids).execute().data or []
+    keep = [r["id"] for r in found]
+    if keep:
+        supabase.table("rv_inbound_emails").delete().eq("business_id", business_id).in_("id", keep).execute()
+    return len(keep)
+
+
+@inbound_routes.delete("/inbound/emails/{email_id}")
+async def delete_email(email_id: str, current_user=Depends(get_current_user)):
+    supabase = get_supabase()
+    business, role = _staff_store(supabase, current_user)
+    if role == "bookkeeper":
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can delete emails.")
+    if not _delete_entries(supabase, business["id"], [email_id]):
+        raise HTTPException(status_code=404, detail="Email not found")
+    return {"deleted": 1}
+
+
+class DeleteEmailsBody(BaseModel):
+    ids: List[str]
+
+
+@inbound_routes.post("/inbound/emails/delete")
+async def delete_emails(body: DeleteEmailsBody, current_user=Depends(get_current_user)):
+    if not body.ids or len(body.ids) > 500:
+        raise HTTPException(status_code=400, detail="Pick between 1 and 500 emails.")
+    supabase = get_supabase()
+    business, role = _staff_store(supabase, current_user)
+    if role == "bookkeeper":
+        raise HTTPException(status_code=403, detail="Only the owner or a manager can delete emails.")
+    return {"deleted": _delete_entries(supabase, business["id"], body.ids)}
+
+
+def _to_items(rows: list) -> list:
     return [{
         "id": r["id"], "from": r.get("from_address"), "subject": r.get("subject"), "status": r.get("status"),
         "receiptsCreated": r.get("receipts_created") or 0, "createdAt": str(r.get("created_at") or ""),
