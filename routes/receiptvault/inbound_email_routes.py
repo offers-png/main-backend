@@ -31,7 +31,9 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from routes.receiptvault.routes import get_current_user, get_supabase as _rv_get_supabase, save_receipt, to_receipt
+from routes.receiptvault.routes import (
+    get_current_user, get_supabase as _rv_get_supabase, save_receipt, to_receipt, extract_receipt_data, _email_text,
+)
 from routes.receiptvault.stores import resolve_store
 from routes.receiptvault import entitlements as ent
 
@@ -116,7 +118,21 @@ async def recent(current_user=Depends(get_current_user)):
     return [{
         "id": r["id"], "from": r.get("from_address"), "subject": r.get("subject"), "status": r.get("status"),
         "receiptsCreated": r.get("receipts_created") or 0, "createdAt": str(r.get("created_at") or ""),
+        "message": _friendly(r),
     } for r in rows]
+
+
+def _friendly(r: dict) -> Optional[str]:
+    """One plain sentence for the owner about an email that didn't save."""
+    status = r.get("status")
+    error = r.get("error") or ""
+    if status == "no_receipt":
+        return NO_RECEIPT_MESSAGE
+    if status == "failed":
+        if RESEND_KEY_ENV in error or "Bearer" in error:
+            return "We couldn't open this email on our side. It's fixed now: forward it again."
+        return "Something went wrong reading this email. Try forwarding it again."
+    return None
 
 
 # ── Webhook ─────────────────────────────────────────────────────────────────
@@ -155,12 +171,20 @@ def tokens_in(addresses) -> list:
     return list(dict.fromkeys(out))
 
 
+# Inbound mail lives in its own Resend workspace (saleh852), separate from
+# the key other apps use to send mail, so it has its own API key.
+RESEND_KEY_ENV = "RESEND_INBOUND_API_KEY"
+NO_RECEIPT_MESSAGE = "No receipt found — attach a PDF or photo."
+
+
 async def _resend_get(path: str) -> dict:
-    key = os.getenv("RESEND_API_KEY", "")
+    key = os.getenv(RESEND_KEY_ENV, "").strip()
+    if not key:
+        raise RuntimeError(f"{RESEND_KEY_ENV} isn't set on the server, so the email couldn't be fetched from Resend")
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.get(f"https://api.resend.com/{path}", headers={"Authorization": f"Bearer {key}"})
     if r.status_code >= 400:
-        raise RuntimeError(f"Resend {path} -> {r.status_code}")
+        raise RuntimeError(f"Resend {path} -> {r.status_code}: {r.text[:200]}")
     return r.json()
 
 
@@ -235,8 +259,10 @@ async def resend_inbound(request: Request):
         return {"ok": True, "ignored": "unknown address"}  # only valid tokens are accepted
     business_id = addr["business_id"]
 
-    if supabase.table("rv_inbound_emails").select("id").eq("resend_email_id", email_id).execute().data:
+    earlier = supabase.table("rv_inbound_emails").select("id, status").eq("resend_email_id", email_id).execute().data or []
+    if any(e.get("status") != "failed" for e in earlier):
         return {"ok": True, "ignored": "duplicate"}
+    # A replay of an email that failed (e.g. the key was missing) is tried again
 
     biz_rows = supabase.table("businesses").select("*").eq("id", business_id).execute().data
     if not biz_rows:
@@ -263,7 +289,11 @@ async def resend_inbound(request: Request):
         _log(supabase, {**base_log, "status": "too_large"})
         return {"ok": True, "ignored": "too large"}
 
-    log = _log(supabase, {**base_log, "status": "processing"})
+    if earlier:
+        log = earlier[0]
+        supabase.table("rv_inbound_emails").update({"status": "processing", "error": None}).eq("id", log["id"]).execute()
+    else:
+        log = _log(supabase, {**base_log, "status": "processing"})
     created = []
     try:
         receipt_files = []
@@ -292,29 +322,38 @@ async def resend_inbound(request: Request):
             )
             created.append(row)
 
+        no_receipt_reason = None
         if not created:
-            # No usable attachment: the email itself is the receipt
+            # No usable attachment: read the receipt from the email body
             email = await _resend_get(f"emails/receiving/{email_id}")
             html = email.get("html") or ""
             text = email.get("text") or ""
-            if html or text:
+            # Plain text, never raw HTML, so nothing from the email can run
+            # when someone opens the stored file.
+            body_text = (_email_text(base64.b64encode(html.encode("utf-8")).decode()) if html else text).strip()
+            fields = {}
+            if body_text:
+                fields = await extract_receipt_data(base64.b64encode(body_text.encode("utf-8")).decode(), "text/plain") or {}
+            if fields.get("amount") is not None or fields.get("merchant"):
                 pdf = await _html_to_pdf(html) if html else None
                 if pdf:
                     content, ext, mime = pdf, ".pdf", "application/pdf"
                 else:
-                    # Plain text, never raw HTML, so nothing from the email
-                    # can run when someone opens the stored file.
-                    from routes.receiptvault.routes import _email_text
-                    body_text = _email_text(base64.b64encode(html.encode("utf-8")).decode()) if html else text
                     content, ext, mime = body_text.encode("utf-8"), ".txt", "text/plain"
                 subject = re.sub(r"[^A-Za-z0-9 _-]+", "", base_log["subject"])[:40].strip() or "email"
                 row = await save_receipt(
                     supabase, business, content=content, original_name=f"email-{email_id[:8]}-{subject}{ext}", ext=ext,
                     mime=mime, submitted_by="email:forwarding",
-                    notes=f"Forwarded by email from {base_log['from_address']}", check_duplicate_name=False,
+                    notes=f"Forwarded by email from {base_log['from_address']} (read from the email text)",
+                    check_duplicate_name=False, ocr_data=fields,
                 )
                 created.append(row)
-        supabase.table("rv_inbound_emails").update({"status": "processed" if created else "no_receipt", "receipts_created": len(created)}).eq("id", log["id"]).execute()
+            else:
+                no_receipt_reason = NO_RECEIPT_MESSAGE
+                print(f"[inbound] {email_id}: no attachment and no receipt in the email text")
+        supabase.table("rv_inbound_emails").update({
+            "status": "processed" if created else "no_receipt", "receipts_created": len(created), "error": no_receipt_reason,
+        }).eq("id", log["id"]).execute()
     except Exception as e:
         print(f"[inbound] processing {email_id} failed: {e}")
         supabase.table("rv_inbound_emails").update({"status": "failed", "error": str(e)[:500], "receipts_created": len(created)}).eq("id", log["id"]).execute()

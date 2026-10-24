@@ -17,7 +17,8 @@ SECRET = "whsec_" + base64.b64encode(b"inbound-test-secret").decode()
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
     monkeypatch.setenv("RESEND_INBOUND_WEBHOOK_SECRET", SECRET)
-    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("RESEND_INBOUND_API_KEY", "re_test")
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
 
 

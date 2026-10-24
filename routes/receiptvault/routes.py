@@ -851,9 +851,11 @@ async def upload_receipt(request: Request, current_user=Depends(get_current_user
 
 async def save_receipt(supabase, business: dict, *, content: bytes, original_name: str, ext: str, mime: str,
                        submitted_by: str, approval_status: str = "approved", ocr_base64: Optional[str] = None,
-                       notes: Optional[str] = None, check_duplicate_name: bool = True) -> dict:
+                       notes: Optional[str] = None, check_duplicate_name: bool = True,
+                       ocr_data: Optional[dict] = None) -> dict:
     """Store the file, read it with AI, save the receipt row, then try to
-    match it to a bank charge. Raises 409 on a duplicate file name."""
+    match it to a bank charge. Raises 409 on a duplicate file name.
+    `ocr_data`: already-read fields (skips a second AI call)."""
     business_id = business["id"]
     supabase_url = os.getenv("SUPABASE_URL", "https://wzcuzyouymauokijaqjk.supabase.co")
 
@@ -878,7 +880,8 @@ async def save_receipt(supabase, business: dict, *, content: bytes, original_nam
     file_url = f"{supabase_url}/storage/v1/object/public/receipts/{unique}"
 
     # Read it with AI (if that fails, the receipt still saves)
-    ocr_data = await extract_receipt_data(ocr_base64 or b64lib.b64encode(content).decode("utf-8"), mime)
+    if ocr_data is None:
+        ocr_data = await extract_receipt_data(ocr_base64 or b64lib.b64encode(content).decode("utf-8"), mime)
 
     insert_payload = {
         "business_id": business_id,
