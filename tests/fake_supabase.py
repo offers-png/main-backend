@@ -30,6 +30,19 @@ def _is(v, val):
     return v == val
 
 
+def _history_date(row):
+    """receipts.history_date is a generated column in Postgres."""
+    row["history_date"] = row.get("receipt_date") or (str(row.get("uploaded_at") or "")[:10] or None)
+
+
+def _key(v):
+    """Numbers compare as numbers (amounts), everything else as text."""
+    try:
+        return (0, float(v), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(v))
+
+
 def _cmp_val(v):
     return "" if v is None else str(v)
 
@@ -43,6 +56,7 @@ class _Query:
         self._payload = None
         self._order = []
         self._limit = None
+        self._offset = 0
         self._count = None
         self._upsert_conflict = None
 
@@ -83,11 +97,11 @@ class _Query:
         return self
 
     def gte(self, col, val):
-        self._filters.append(lambda r: r.get(col) is not None and str(r.get(col)) >= str(val))
+        self._filters.append(lambda r: r.get(col) is not None and (_key(r.get(col)) >= _key(val) if isinstance(val, (int, float)) else str(r.get(col)) >= str(val)))
         return self
 
     def lte(self, col, val):
-        self._filters.append(lambda r: r.get(col) is not None and str(r.get(col))[: len(str(val))] <= str(val))
+        self._filters.append(lambda r: r.get(col) is not None and (_key(r.get(col)) <= _key(val) if isinstance(val, (int, float)) else str(r.get(col))[: len(str(val))] <= str(val)))
         return self
 
     def lt(self, col, val):
@@ -127,7 +141,21 @@ class _Query:
         return self
 
     def range(self, a, b):
-        self._limit = b - a + 1
+        self._offset, self._limit = a, b - a + 1
+        return self
+
+    def or_(self, clause):
+        """Just the or=() shapes the routes use: col.ilike."%text%" and col.eq.value."""
+        import re
+        tests = []
+        for col, op, val in re.findall(r'(\w+)\.(ilike|eq)\.("[^"]*"|[^,]*)', clause):
+            val = val.strip('"')
+            if op == "ilike":
+                p = val.strip("%").lower()
+                tests.append(lambda r, c=col, p=p: p in str(r.get(c) or "").lower())
+            else:
+                tests.append(lambda r, c=col, v=val: r.get(c) is not None and _key(r.get(c)) == _key(v))
+        self._filters.append(lambda r: any(t(r) for t in tests))
         return self
 
     def single(self):
@@ -150,6 +178,7 @@ class _Query:
         row.setdefault("created_at", now)
         if self.table == "receipts":
             row.setdefault("uploaded_at", now)
+            _history_date(row)
         return row
 
     def execute(self):
@@ -181,6 +210,8 @@ class _Query:
         if self._op == "update":
             for r in matched:
                 r.update(copy.deepcopy(self._payload))
+                if self.table == "receipts":
+                    _history_date(r)
             return _Result(copy.deepcopy(matched))
         if self._op == "delete":
             for r in matched:
@@ -191,7 +222,7 @@ class _Query:
             out = sorted(out, key=lambda r: _cmp_val(r.get(col)), reverse=desc)
         count = len(out)
         if self._limit is not None:
-            out = out[: self._limit]
+            out = out[self._offset: self._offset + self._limit]
         return _Result(copy.deepcopy(out), count=count)
 
 
