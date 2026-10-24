@@ -158,6 +158,11 @@ async def send_for_business(business: dict):
 
         print(f"[scheduler] {biz_name}: sent {len(receipts)} receipts ✓")
 
+        # Android app: "Your accountant papers were sent"
+        from routes.receiptvault.push_routes import notify_store_owner
+        await notify_store_owner(supabase, biz_id, "accountant_sent", "Your accountant papers were sent",
+                                 f"{len(receipts)} receipt{'s' if len(receipts) != 1 else ''} went to {acct_email}.", "/receipts")
+
         # ── SMS notify owner ─────────────────────────────────────────────
         if owner_phone and TELNYX_API_KEY:
             await send_sms(

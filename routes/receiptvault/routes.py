@@ -1030,6 +1030,10 @@ async def resend_all(current_user=Depends(get_current_user)):
                 sent_at = datetime.now(timezone.utc).isoformat()
                 for rid in receipt_ids:
                     supabase.table("receipts").update({"sent_at": sent_at, "send_error": None}).eq("id", rid).execute()
+                # Android app: "Your accountant papers were sent"
+                from routes.receiptvault.push_routes import notify_store_owner
+                await notify_store_owner(supabase, business["id"], "accountant_sent", "Your accountant papers were sent",
+                                                 f"{len(receipt_ids)} receipt{'s' if len(receipt_ids) != 1 else ''} went to {business.get('accountant_email')}.", "/receipts")
             else:
                 err_msg = f"Email failed ({resp.status_code}): {resp.text[:500]}"
                 print(f"Resend-all send failed: {err_msg}")
@@ -1150,6 +1154,10 @@ async def send_now(current_user=Depends(get_current_user)):
             sent_at = datetime.now(timezone.utc).isoformat()
             for rid in receipt_ids:
                 supabase.table("receipts").update({"sent_at": sent_at, "send_error": None}).eq("id", rid).execute()
+            # Android app: "Your accountant papers were sent"
+            from routes.receiptvault.push_routes import notify_store_owner
+            await notify_store_owner(supabase, business["id"], "accountant_sent", "Your accountant papers were sent",
+                                     f"{len(receipt_ids)} receipt{'s' if len(receipt_ids) != 1 else ''} went to {business.get('accountant_email')}.", "/receipts")
 
             # SMS notify owner
             owner_phone = business.get("owner_phone", "")

@@ -315,6 +315,15 @@ async def stripe_webhook(request: Request):
             # Stripe retries per its settings; just flag it so the app can warn.
             supabase.table("rv_accounts").update({"subscription_status": "past_due"}).eq("stripe_customer_id", customer).execute()
 
+    elif etype in ("financial_connections.account.deactivated", "financial_connections.account.disconnected"):
+        # The bank stopped sharing (password changed, consent expired...): the
+        # owner has to connect it again. Flag it and tell them (Android push).
+        try:
+            from routes.receiptvault.connect_routes import handle_account_inactive
+            await handle_account_inactive(supabase, obj, etype)
+        except ModuleNotFoundError:
+            pass
+
     elif etype == "financial_connections.account.refreshed_transactions":
         try:
             from routes.receiptvault.connect_routes import handle_refreshed_transactions

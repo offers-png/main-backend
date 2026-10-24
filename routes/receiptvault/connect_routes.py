@@ -282,6 +282,23 @@ async def handle_refreshed_transactions(supabase, fc_account: dict):
     await sync_account(supabase, biz[0], row, latest_refresh=refresh.get("id"))
 
 
+async def handle_account_inactive(supabase, fc_account: dict, etype: str):
+    """Webhook: Stripe says this connection stopped working. Mark it so the
+    app shows "Connect again", and send the owner one push."""
+    rows = supabase.table("rv_bank_accounts").select("*").eq("stripe_account_id", fc_account.get("id")).execute().data or []
+    if not rows:
+        return
+    row = rows[0]
+    if row.get("status") != "active":
+        return  # already flagged (or the owner disconnected it): don't repeat the push
+    new_status = "disconnected" if etype.endswith("disconnected") else "inactive"
+    supabase.table("rv_bank_accounts").update({"status": new_status, "updated_at": _now()}).eq("id", row["id"]).execute()
+    from routes.receiptvault.push_routes import notify_store_owner
+    bank = row.get("institution") or "Your bank"
+    await notify_store_owner(supabase, row["business_id"], "bank_relogin", f"{bank} needs you to sign in again",
+                             "Your charges stopped coming in. Tap to connect it again.", "/settings?tab=banks")
+
+
 STALE_AFTER_HOURS = 12
 
 

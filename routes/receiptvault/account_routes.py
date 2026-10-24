@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from routes.receiptvault.routes import get_current_user, get_supabase as _rv_get_supabase
 from routes.receiptvault.stores import owned_stores, memberships
 from routes.receiptvault import entitlements as ent
+from routes.receiptvault.push_routes import delete_user_push_data, export_user_push_data
 
 account_routes = APIRouter(prefix="/api", tags=["account"])
 
@@ -157,6 +158,7 @@ async def export_account(current_user=Depends(get_current_user)):
             "user": {"id": uid, "email": current_user.user.email},
             "billingAccount": {k: v for k, v in ent.get_account(supabase, uid).items()} if owned else None,
             "teamMemberships": mems,
+            **export_user_push_data(supabase, uid),
         }
         z.writestr("account.json", json.dumps(profile, indent=2, default=str))
         readme = [
@@ -290,6 +292,7 @@ async def delete_account(body: DeleteBody, current_user=Depends(get_current_user
     supabase.table("business_users").delete().eq("user_id", uid).execute()
     supabase.table("business_users").delete().eq("email", current_user.user.email or "__none__").execute()
     supabase.table("rv_accounts").delete().eq("owner_user_id", uid).execute()
+    delete_user_push_data(supabase, uid)  # Android phones + notification switches
 
     # The shared login goes too only if no other app has anything of theirs.
     login_deleted = False

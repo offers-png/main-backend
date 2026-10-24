@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from scheduler import run_scheduled_sends
 from routes.receiptvault.connect_routes import sync_stale_accounts
 from routes.receiptvault.entitlements import cancel_comp_subscriptions
+from routes.receiptvault.push_routes import run_weekly_missing_receipts
 from routes.receiptvault.routes import get_supabase as rk_supabase
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.stores import ActiveStoreMiddleware
@@ -39,6 +40,9 @@ async def lifespan(app: FastAPI):
         await cancel_comp_subscriptions(rk_supabase())
     scheduler.add_job(_cancel_comp, IntervalTrigger(hours=6), id="rk_comp_cancel", replace_existing=True,
                       next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45))
+    # Android push: Monday-morning "charges need a receipt" summary (store time)
+    scheduler.add_job(run_weekly_missing_receipts, IntervalTrigger(hours=1), id="rk_push_weekly", replace_existing=True,
+                      next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2))
     scheduler.start()
     print("[startup] ReceiptVault scheduler started — runs every hour")
     yield

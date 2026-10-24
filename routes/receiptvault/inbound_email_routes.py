@@ -415,4 +415,12 @@ async def resend_inbound(request: Request):
     except Exception as e:
         print(f"[inbound] processing {email_id} failed: {e}")
         supabase.table("rv_inbound_emails").update({"status": "failed", "error": str(e)[:500], "receipts_created": len(created)}).eq("id", log["id"]).execute()
+    if created:
+        # Android app: "Receipt from A-1 Wholesale saved" -> opens that receipt
+        from routes.receiptvault.push_routes import notify_store_owner
+        first = created[0]
+        who = (first.get("merchant") or "").strip()
+        title = (f"Receipt from {who} saved" if who else "Email receipt saved") if len(created) == 1 else f"{len(created)} email receipts saved"
+        await notify_store_owner(supabase, business["id"], "receipt_saved", title, "Forwarded by email. Tap to check it.",
+                                 f"/receipts/{first['id']}" if len(created) == 1 and first.get("id") else "/receipts")
     return {"ok": True, "receipts": [to_receipt(r) for r in created]}
