@@ -250,6 +250,20 @@ def public_plans() -> list:
 
 # ── Accounts ────────────────────────────────────────────────────────────────
 
+# Lifetime ("comp") accounts: rv_accounts.comp_plan names a plan the owner
+# has for free, forever. Only the database administrator can set it (a
+# trigger refuses it from the backend and from browsers); there is no button.
+# It wins over whatever Stripe says, has no limits, and is never billed.
+UNLIMITED_STORES = 10**6
+
+
+def _apply_comp(acct: dict) -> dict:
+    comp = acct.get("comp_plan")
+    if comp not in PLAN_LIMITS or comp == "free":
+        return acct
+    return {**acct, "plan": comp, "is_comp": True, "subscription_status": "active", "extra_stores": 0}
+
+
 def get_account(supabase, owner_user_id: str) -> dict:
     """The owner's billing account; created on Free the first time we see them."""
     rows = supabase.table("rv_accounts").select("*").eq("owner_user_id", owner_user_id).execute()
@@ -268,7 +282,7 @@ def get_account(supabase, owner_user_id: str) -> dict:
                 acct = again.data[0]
     if acct.get("plan") not in PLAN_LIMITS:
         acct["plan"] = "free"
-    return acct
+    return _apply_comp(acct)
 
 
 def account_for_business(supabase, business: dict) -> dict:
@@ -283,7 +297,13 @@ def update_account(supabase, owner_user_id: str, data: dict):
 
 
 def limits_for(account: dict) -> dict:
-    return PLAN_LIMITS[account.get("plan") or "free"]
+    limits = PLAN_LIMITS[account.get("plan") or "free"]
+    if account.get("is_comp"):
+        # Lifetime: every feature of the plan, nothing counted against a limit
+        return {**limits, "scans_per_month": None, "statement_uploads_per_month": None, "bank_accounts": None,
+                "team_members": None, "included_stores": UNLIMITED_STORES, "extra_store_price": None,
+                "extra_store_price_yearly": None}
+    return limits
 
 
 def has_feature(account: dict, feature: str) -> bool:
@@ -506,6 +526,8 @@ def check_store_writable(supabase, business: dict, role: str = "owner"):
 
 def check_can_add_store(supabase, owner_user_id: str, owned_count: int):
     account = get_account(supabase, owner_user_id)
+    if account.get("is_comp"):
+        return  # lifetime: as many stores as they like, never billed
     plan = account.get("plan") or "free"
     p = PLAN_LIMITS[plan]
     if p["extra_store_price"] is None:
@@ -557,6 +579,8 @@ async def sync_store_addon_quantity(supabase, owner_user_id: str):
     """Bill extra stores as a second subscription item: quantity = active
     stores beyond the included one, priced at the owner's plan's add-on."""
     account = get_account(supabase, owner_user_id)
+    if account.get("is_comp"):
+        return  # lifetime accounts are never billed for stores
     plan = account.get("plan") or "free"
     sub_id = account.get("stripe_subscription_id")
     extra = max(0, len(active_owned_stores(supabase, owner_user_id)) - PLAN_LIMITS[plan]["included_stores"])
@@ -579,6 +603,28 @@ async def sync_store_addon_quantity(supabase, owner_user_id: str):
         await stripe_request("DELETE", f"subscription_items/{item['id']}?proration_behavior=always_invoice")
     # Webhook confirms this later; set it now so the new store is usable at once.
     update_account(supabase, owner_user_id, {"extra_stores": extra})
+
+
+async def cancel_comp_subscriptions(supabase) -> list:
+    """A lifetime account shouldn't keep paying: cancel any Stripe
+    subscription still attached to it, immediately, with no final invoice and
+    no proration. The customer.subscription.deleted webhook then records it;
+    the account stays on its lifetime plan regardless."""
+    rows = supabase.table("rv_accounts").select("*").execute().data or []
+    done = []
+    for r in rows:
+        if not r.get("comp_plan") or not r.get("stripe_subscription_id"):
+            continue
+        if r.get("subscription_status") not in (None, "active", "trialing", "past_due", "incomplete", "unpaid"):
+            continue
+        sub_id = r["stripe_subscription_id"]
+        try:
+            await stripe_request("DELETE", f"subscriptions/{sub_id}?invoice_now=false&prorate=false")
+            print(f"[billing] lifetime account {r['owner_user_id']}: canceled {sub_id} (no charge)")
+            done.append(sub_id)
+        except HTTPException as e:
+            print(f"[billing] lifetime account {r['owner_user_id']}: cancel {sub_id} failed: {e.detail}")
+    return done
 
 
 def apply_subscription(supabase, subscription: dict, owner_user_id: Optional[str] = None):

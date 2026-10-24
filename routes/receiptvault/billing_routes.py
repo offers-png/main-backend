@@ -76,14 +76,16 @@ async def billing_status(current_user=Depends(get_current_user)):
             print(f"[billing] couldn't save timezone: {e}")
 
     plan = account.get("plan") or "free"
-    limits = ent.PLAN_LIMITS[plan]
+    limits = ent.limits_for(account)
+    comp = bool(account.get("is_comp"))
     interval = account.get("billing_interval") or "month"
     read_only = ent.read_only_store_ids(supabase, owner, account)
     stores = owned_stores(supabase, owner)
     return {
         "plan": plan,
         "planName": limits["name"],
-        "price": ent.plan_price(plan, interval),
+        "isComp": comp,  # lifetime plan: free forever, no limits, no upgrade prompts
+        "price": 0.0 if comp else ent.plan_price(plan, interval),
         "interval": interval,
         "features": list(limits["features"]),
         "limits": {
@@ -91,7 +93,7 @@ async def billing_status(current_user=Depends(get_current_user)):
             "statementUploadsPerMonth": limits["statement_uploads_per_month"],
             "bankAccounts": limits["bank_accounts"],
             "teamMembers": limits["team_members"],
-            "includedStores": limits["included_stores"],
+            "includedStores": None if comp else limits["included_stores"],
         },
         "usage": {
             "scansThisMonth": ent.count_scans_this_month(supabase, owner, account),
@@ -100,7 +102,7 @@ async def billing_status(current_user=Depends(get_current_user)):
             "teamMembers": ent.count_team_members(supabase, owner),
             "stores": len([s for s in stores if not s.get("archived_at")]),
         },
-        "extraStorePrice": ent.extra_store_price(plan, interval),
+        "extraStorePrice": None if comp else ent.extra_store_price(plan, interval),
         "extraStores": int(account.get("extra_stores") or 0),
         "readOnlyStoreIds": read_only,
         "activeStoreReadOnly": business["id"] in read_only,
@@ -165,6 +167,8 @@ async def create_checkout(body: CheckoutBody, current_user=Depends(get_current_u
 
     supabase = get_supabase()
     _business, account = _owner_account_or_403(supabase, current_user)
+    if account.get("is_comp"):
+        raise HTTPException(status_code=400, detail=f"You have {account['plan'].title()} for life, so there's nothing to buy.")
     owner = current_user.user.id
     extra = max(0, len(ent.active_owned_stores(supabase, owner)) - 1)
 

@@ -7,6 +7,8 @@ from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime, timedelta, timezone
 from scheduler import run_scheduled_sends
 from routes.receiptvault.connect_routes import sync_stale_accounts
+from routes.receiptvault.entitlements import cancel_comp_subscriptions
+from routes.receiptvault.routes import get_supabase as rk_supabase
 from routes.clipper.routes import clipper_routes
 from routes.receiptvault.stores import ActiveStoreMiddleware
 from routes.receiptvault.app_setup import register_receiptkept
@@ -32,6 +34,11 @@ async def lifespan(app: FastAPI):
     # plan sleeps when idle, so a wake-up is often the first chance to run.
     scheduler.add_job(sync_stale_accounts, IntervalTrigger(hours=6), id="rk_bank_sync", replace_existing=True,
                       next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1))
+    # Lifetime accounts: stop any Stripe subscription still attached (no charge)
+    async def _cancel_comp():
+        await cancel_comp_subscriptions(rk_supabase())
+    scheduler.add_job(_cancel_comp, IntervalTrigger(hours=6), id="rk_comp_cancel", replace_existing=True,
+                      next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45))
     scheduler.start()
     print("[startup] ReceiptVault scheduler started — runs every hour")
     yield
